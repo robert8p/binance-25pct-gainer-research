@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Binance 8-Hour 25% Gainer Research</title>
+  <style>
+    :root { color-scheme: dark; --bg:#0b0f14; --panel:#141a22; --line:#27303d; --text:#f3f5f7; --muted:#9ba7b4; --accent:#f3ba2f; }
+    * { box-sizing:border-box; } body { margin:0; font-family:Inter,system-ui,sans-serif; background:var(--bg); color:var(--text); }
+    main { max-width:1280px; margin:auto; padding:32px 20px 60px; } h1 { margin:0 0 8px; font-size:32px; } h2 { margin-top:0; }
+    .muted { color:var(--muted); } .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(320px,1fr)); gap:18px; margin:22px 0; }
+    .card { background:var(--panel); border:1px solid var(--line); border-radius:16px; padding:20px; margin-top:18px; }
+    label { display:block; font-size:13px; color:var(--muted); margin:12px 0 5px; } input,select { width:100%; padding:11px; border-radius:9px; border:1px solid var(--line); background:#0d1218; color:var(--text); }
+    .check { display:flex; gap:9px; align-items:center; margin:10px 0; } .check input { width:auto; } button { margin-top:14px; background:var(--accent); color:#17130a; border:0; padding:11px 16px; border-radius:9px; font-weight:750; cursor:pointer; }
+    table { width:100%; border-collapse:collapse; font-size:13px; } th,td { text-align:left; border-bottom:1px solid var(--line); padding:10px 8px; vertical-align:top; } th { color:var(--muted); font-weight:600; }
+    a { color:#ffd86b; } .status { font-weight:700; } .warning { border-left:4px solid var(--accent); padding-left:12px; } .scroll { overflow:auto; } code { color:#fbd77d; } .small { font-size:12px; }
+  </style>
+</head>
+<body><main>
+  <h1>Binance 8-Hour 25% Gainer Research</h1>
+  <p class="muted">v{{ version }} — a separate evidence programme derived from the latest 50% application.</p>
+  <p class="warning">The event definition is fixed: the earliest later-minute high at least 25% above a prior-minute low within 480 completed minutes.</p>
+  <p class="warning">The inherited 50%-specific confirmation and trading-rule backtest are intentionally excluded. First establish what predicts the broader 25% event population.</p>
+
+  <div class="grid">
+    <section class="card">
+      <h2>Step 1 — Queue 25% scan</h2>
+      <form method="post" action="/scans">
+        <label>Lookback, completed UTC days</label><input name="lookback_days" type="number" value="60" min="1" max="180">
+        <label>Optional historical start date (UTC, inclusive)</label><input name="window_start_date" type="date">
+        <label>Optional historical end date (UTC, exclusive)</label><input name="window_end_date_exclusive" type="date">
+        <p class="muted small">Leave both dates blank for the latest 60 completed UTC days.</p>
+        <label>Fixed gain threshold</label><input value="25%" disabled>
+        <label>Fixed rolling window</label><input value="8 hours (480 completed minutes)" disabled>
+        <label>Canonical quote preference</label><input name="quote_assets" value="USDT,USDC,FDUSD">
+        <label>Minimum executed seller-side exit notional</label><input name="min_exit_notional" type="number" value="500" step="1">
+        <label>Saleability window after crossing (seconds)</label><input name="confirmation_window_seconds" type="number" value="300" min="30" max="3600">
+        <button>Queue 25% scan</button>
+      </form>
+    </section>
+
+    <section class="card">
+      <h2>Step 2 — Build event archive</h2>
+      <form method="post" action="/research">
+        <label>Completed source scan</label><select name="scan_id" required>{% for scan in completed_scans %}<option value="{{ scan.id }}">{{ scan.created_at }} — {{ scan.events_found }} saleable — {{ scan.id[:8] }}</option>{% endfor %}</select>
+        <label>Prior complete UTC days</label><input name="prior_days" type="number" value="10" min="1" max="30">
+        <label>Maximum events (1 test; 0 all)</label><input name="maximum_events" type="number" value="1" min="0">
+        <label class="check"><input name="include_1s_klines" type="checkbox" checked> Include 1-second klines</label>
+        <label class="check"><input name="include_agg_trades" type="checkbox" checked> Include aggregate trades</label>
+        <label class="check"><input name="include_raw_trades" type="checkbox"> Include every raw trade — much larger</label>
+        <button>Queue event archive</button>
+      </form>
+    </section>
+
+    <section class="card">
+      <h2>Step 3 — Build matched controls</h2>
+      <form method="post" action="/matched-controls">
+        <label>Completed source scan</label><select name="scan_id" required>{% for scan in completed_scans %}<option value="{{ scan.id }}">{{ scan.created_at }} — {{ scan.events_found }} saleable — {{ scan.id[:8] }}</option>{% endfor %}</select>
+        <label>Same-coin controls per event</label><input name="controls_per_event" type="number" value="5" min="1" max="10">
+        <label>Predictor-history days</label><input name="prior_days" type="number" value="10" min="1" max="30">
+        <label>Decision horizons, minutes</label><input name="horizons_minutes" value="15,30,60,120,180,480">
+        <label>Minimum prior 5-minute quote volume</label><input name="min_entry_notional" type="number" value="500" min="0" step="1">
+        <button>Queue matched-control package</button>
+      </form>
+      <p class="muted small">Controls are rejected if they are contaminated by a 25% crossing in the relevant window.</p>
+    </section>
+
+    <section class="card">
+      <h2>Step 4 — Build ten-day context</h2>
+      <form method="post" action="/ten-day-context">
+        <label>Completed matched-control job</label><select name="matched_control_job_id" required>{% for job in completed_matched_jobs %}<option value="{{ job.id }}">{{ job.created_at }} — {{ job.controls_created or 0 }} controls — {{ job.id[:8] }}</option>{% endfor %}</select>
+        <label>Research treatment</label><select name="research_mode"><option value="exploratory_reuse">Exploratory</option><option value="fresh_staged">Fresh staged discovery/validation/sealed</option></select>
+        <label>Context history</label><input value="10 days" disabled>
+        <label>Decision horizons, minutes</label><input name="horizons_minutes" value="15,30,60,120,180,480">
+        <label>Minimum prior 5-minute quote volume</label><input name="min_entry_notional" type="number" value="500" min="0" step="1">
+        <button>Queue ten-day context package</button>
+      </form>
+    </section>
+
+    <section class="card">
+      <h2>Step 5 — Build baseline context</h2>
+      <form method="post" action="/baseline-context">
+        <label>Completed matched-control job</label><select name="matched_control_job_id" required>{% for job in completed_matched_jobs %}<option value="{{ job.id }}">{{ job.created_at }} — {{ job.controls_created or 0 }} controls — {{ job.id[:8] }}</option>{% endfor %}</select>
+        <label>Research treatment</label><select name="research_mode"><option value="exploratory_reuse">Exploratory alignment audit</option><option value="fresh_staged">Fresh staged evidence</option></select>
+        <label>Snapshots before baseline</label><input value="10d, 7d, 5d, 3d, 48h, 24h, 12h, 8h, 6h, 3h, 1h, baseline" disabled>
+        <label>Continuation check</label><input value="15 minutes before the +25% crossing" disabled>
+        <label>Minimum prior 5-minute quote volume</label><input name="min_entry_notional" type="number" value="500" min="0" step="1">
+        <button>Queue baseline-context package</button>
+      </form>
+    </section>
+  </div>
+
+  <section class="card"><h2>Worker</h2>{% if heartbeat %}<p>Last heartbeat: <code>{{ heartbeat.heartbeat_at }}</code></p>{% else %}<p class="muted">No worker heartbeat yet.</p>{% endif %}</section>
+
+  <section class="card"><h2>Discovery scans</h2><div class="scroll"><table><thead><tr><th>Created</th><th>Status</th><th>Progress</th><th>8h candidates</th><th>Saleable</th><th>Failures</th><th>Downloads</th></tr></thead><tbody>{% for scan in scans %}<tr><td>{{ scan.created_at }}<br><span class="muted">{{ scan.id[:8] }}</span></td><td class="status">{{ scan.status }}</td><td>{{ scan.symbols_processed or 0 }}/{{ scan.symbols_total or 0 }}</td><td>{{ scan.candidates_found or 0 }}</td><td>{{ scan.events_found or 0 }}</td><td>{{ scan.failures or 0 }}</td><td><a href="/exports/events/{{ scan.id }}.csv">saleable events</a> · <a href="/exports/candidates/{{ scan.id }}.csv">all candidates</a> · <a href="/exports/decisions/{{ scan.id }}.csv">decisions</a></td></tr>{% endfor %}</tbody></table></div></section>
+
+  <section class="card"><h2>Matched-control jobs</h2><div class="scroll"><table><thead><tr><th>Created</th><th>Status</th><th>Events</th><th>Controls</th><th>Feature rows</th><th>Failures</th></tr></thead><tbody>{% for job in matched_jobs %}<tr><td>{{ job.created_at }}<br><span class="muted">{{ job.id[:8] }}</span></td><td class="status">{{ job.status }}</td><td>{{ job.events_processed or 0 }}/{{ job.events_total or 0 }}</td><td>{{ job.controls_created or 0 }}/{{ job.controls_target or 0 }}</td><td>{{ job.feature_rows or 0 }}</td><td>{{ job.failures or 0 }}</td></tr>{% endfor %}</tbody></table></div></section>
+
+  <section class="card"><h2>Ten-day context jobs</h2><div class="scroll"><table><thead><tr><th>Created</th><th>Status</th><th>Mode</th><th>Samples</th><th>Feature rows</th><th>Failures</th></tr></thead><tbody>{% for job in context_jobs %}<tr><td>{{ job.created_at }}<br><span class="muted">{{ job.id[:8] }}</span></td><td class="status">{{ job.status }}</td><td>{{ job.research_mode }}</td><td>{{ job.samples_processed or 0 }}/{{ job.samples_total or 0 }}</td><td>{{ job.feature_rows or 0 }}</td><td>{{ job.failures or 0 }}</td></tr>{% endfor %}</tbody></table></div></section>
+
+  <section class="card"><h2>Baseline-context jobs</h2><div class="scroll"><table><thead><tr><th>Created</th><th>Status</th><th>Mode</th><th>Samples</th><th>Baseline rows</th><th>Continuation rows</th><th>Failures</th></tr></thead><tbody>{% for job in baseline_context_jobs %}<tr><td>{{ job.created_at }}<br><span class="muted">{{ job.id[:8] }}</span></td><td class="status">{{ job.status }}</td><td>{{ job.research_mode }}</td><td>{{ job.samples_processed or 0 }}/{{ job.samples_total or 0 }}</td><td>{{ job.feature_rows or 0 }}</td><td>{{ job.continuation_rows or 0 }}</td><td>{{ job.failures or 0 }}</td></tr>{% endfor %}</tbody></table></div></section>
+
+  <section class="card"><h2>Research downloads</h2><p class="warning">Open discovery first. Keep validation and sealed-test files closed until the relevant rule is fixed.</p><div class="scroll"><table><thead><tr><th>Created</th><th>Role</th><th>Split</th><th>File</th><th>Download</th></tr></thead><tbody>
+    {% for file in matched_files %}<tr><td>{{ file.created_at }}</td><td>matched control</td><td>{{ file.split or "index" }}</td><td>{{ file.filename }}</td><td><a href="/matched-files/{{ file.id }}">temporary link</a></td></tr>{% endfor %}
+    {% for file in context_files %}<tr><td>{{ file.created_at }}</td><td>ten-day context</td><td>{{ file.split or "index" }}</td><td>{{ file.filename }}</td><td><a href="/context-files/{{ file.id }}">temporary link</a></td></tr>{% endfor %}
+    {% for file in baseline_context_files %}<tr><td>{{ file.created_at }}</td><td>baseline context</td><td>{{ file.split or "index" }}</td><td>{{ file.filename }}</td><td><a href="/baseline-context-files/{{ file.id }}">temporary link</a></td></tr>{% endfor %}
+    {% for file in files %}<tr><td>{{ file.created_at }}</td><td>{{ file.role or "event archive" }}</td><td>—</td><td>{{ file.filename }}</td><td><a href="/files/{{ file.id }}">temporary link</a></td></tr>{% endfor %}
+  </tbody></table></div></section>
+</main></body></html>

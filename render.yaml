@@ -1,0 +1,47 @@
+services:
+  - type: web
+    name: binance-25pct-scanner-web
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.web:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.13.5
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: APP_PASSWORD
+        sync: false
+      - key: SUPABASE_STORAGE_BUCKET
+        value: binance-25pct-gainer-research
+
+  - type: worker
+    name: binance-25pct-scanner-worker
+    runtime: python
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m app.worker
+    disk:
+      name: binance-25pct-data
+      mountPath: /var/data
+      sizeGB: 10
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.13.5
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: APP_PASSWORD
+        sync: false
+      - key: SUPABASE_STORAGE_BUCKET
+        value: binance-25pct-gainer-research
+      - key: TEMP_DATA_DIR
+        value: /var/data
+      - key: BINANCE_API_BASE_URLS
+        value: https://api.binance.com,https://data-api.binance.vision
+      - key: POLL_SECONDS
+        value: 10
