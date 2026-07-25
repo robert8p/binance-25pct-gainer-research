@@ -20,7 +20,7 @@
   <h1>Binance 8-Hour 25% Gainer Research</h1>
   <p class="muted">v{{ version }} — a separate evidence programme derived from the latest 50% application.</p>
   <p class="warning">The event definition is fixed: the earliest later-minute high at least 25% above a prior-minute low within 480 completed minutes.</p>
-  <p class="warning">The inherited 50%-specific confirmation and trading-rule backtest are intentionally excluded. First establish what predicts the broader 25% event population.</p>
+  <p class="warning">This app does not generate hypotheses or signals. It packages neutral evidence for ChatGPT-led pattern discovery.</p>
 
   <div class="grid">
     <section class="card">
@@ -69,7 +69,7 @@
       <h2>Step 4 — Build ten-day context</h2>
       <form method="post" action="/ten-day-context">
         <label>Completed matched-control job</label><select name="matched_control_job_id" required>{% for job in completed_matched_jobs %}<option value="{{ job.id }}">{{ job.created_at }} — {{ job.controls_created or 0 }} controls — {{ job.id[:8] }}</option>{% endfor %}</select>
-        <label>Research treatment</label><select name="research_mode"><option value="exploratory_reuse">Exploratory</option><option value="fresh_staged">Fresh staged discovery/validation/sealed</option></select>
+        <label>Research treatment</label><select name="research_mode"><option value="fresh_staged" selected>Fresh staged discovery/validation/sealed</option><option value="exploratory_reuse">Exploratory — all rows opened together</option></select>
         <label>Context history</label><input value="10 days" disabled>
         <label>Decision horizons, minutes</label><input name="horizons_minutes" value="15,30,60,120,180,480">
         <label>Minimum prior 5-minute quote volume</label><input name="min_entry_notional" type="number" value="500" min="0" step="1">
@@ -81,9 +81,9 @@
       <h2>Step 5 — Build baseline context</h2>
       <form method="post" action="/baseline-context">
         <label>Completed matched-control job</label><select name="matched_control_job_id" required>{% for job in completed_matched_jobs %}<option value="{{ job.id }}">{{ job.created_at }} — {{ job.controls_created or 0 }} controls — {{ job.id[:8] }}</option>{% endfor %}</select>
-        <label>Research treatment</label><select name="research_mode"><option value="exploratory_reuse">Exploratory alignment audit</option><option value="fresh_staged">Fresh staged evidence</option></select>
+        <label>Research treatment</label><select name="research_mode"><option value="fresh_staged" selected>Fresh staged discovery/validation/sealed</option><option value="exploratory_reuse">Exploratory — all rows opened together</option></select>
         <label>Snapshots before baseline</label><input value="10d, 7d, 5d, 3d, 48h, 24h, 12h, 8h, 6h, 3h, 1h, baseline" disabled>
-        <label>Continuation check</label><input value="15 minutes before the +25% crossing" disabled>
+        <label>Neutral pre-cross snapshots</label><input value="15, 30, 60, 120, 180 and 480 minutes before crossing" disabled>
         <label>Minimum prior 5-minute quote volume</label><input name="min_entry_notional" type="number" value="500" min="0" step="1">
         <button>Queue baseline-context package</button>
       </form>
@@ -98,7 +98,7 @@
 
   <section class="card"><h2>Ten-day context jobs</h2><div class="scroll"><table><thead><tr><th>Created</th><th>Status</th><th>Mode</th><th>Samples</th><th>Feature rows</th><th>Failures</th></tr></thead><tbody>{% for job in context_jobs %}<tr><td>{{ job.created_at }}<br><span class="muted">{{ job.id[:8] }}</span></td><td class="status">{{ job.status }}</td><td>{{ job.research_mode }}</td><td>{{ job.samples_processed or 0 }}/{{ job.samples_total or 0 }}</td><td>{{ job.feature_rows or 0 }}</td><td>{{ job.failures or 0 }}</td></tr>{% endfor %}</tbody></table></div></section>
 
-  <section class="card"><h2>Baseline-context jobs</h2><div class="scroll"><table><thead><tr><th>Created</th><th>Status</th><th>Mode</th><th>Samples</th><th>Baseline rows</th><th>Continuation rows</th><th>Failures</th></tr></thead><tbody>{% for job in baseline_context_jobs %}<tr><td>{{ job.created_at }}<br><span class="muted">{{ job.id[:8] }}</span></td><td class="status">{{ job.status }}</td><td>{{ job.research_mode }}</td><td>{{ job.samples_processed or 0 }}/{{ job.samples_total or 0 }}</td><td>{{ job.feature_rows or 0 }}</td><td>{{ job.continuation_rows or 0 }}</td><td>{{ job.failures or 0 }}</td></tr>{% endfor %}</tbody></table></div></section>
+  <section class="card"><h2>Baseline-context jobs</h2><div class="scroll"><table><thead><tr><th>Created</th><th>Status</th><th>Mode</th><th>Samples</th><th>Baseline rows</th><th>Pre-cross rows</th><th>Failures</th></tr></thead><tbody>{% for job in baseline_context_jobs %}<tr><td>{{ job.created_at }}<br><span class="muted">{{ job.id[:8] }}</span></td><td class="status">{{ job.status }}</td><td>{{ job.research_mode }}</td><td>{{ job.samples_processed or 0 }}/{{ job.samples_total or 0 }}</td><td>{{ job.feature_rows or 0 }}</td><td>{{ job.pre_cross_rows or 0 }}</td><td>{{ job.failures or 0 }}</td></tr>{% endfor %}</tbody></table></div></section>
 
   <section class="card"><h2>Research downloads</h2><p class="warning">Open discovery first. Keep validation and sealed-test files closed until the relevant rule is fixed.</p><div class="scroll"><table><thead><tr><th>Created</th><th>Role</th><th>Split</th><th>File</th><th>Download</th></tr></thead><tbody>
     {% for file in matched_files %}<tr><td>{{ file.created_at }}</td><td>matched control</td><td>{{ file.split or "index" }}</td><td>{{ file.filename }}</td><td><a href="/matched-files/{{ file.id }}">temporary link</a></td></tr>{% endfor %}

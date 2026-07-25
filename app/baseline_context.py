@@ -8,9 +8,9 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-import numpy as np
 import pandas as pd
 
+from .analysis_contract import write_analysis_contract
 from .binance import BinanceClient, sha256_file
 from .context import CONTEXT_WINDOWS, REFERENCE_SYMBOLS, _zip_directory, compute_context_feature_row
 from .matched_controls import (
@@ -24,57 +24,9 @@ from .matched_controls import (
 )
 from .supabase import SupabaseClient
 
-# These offsets are fixed research design, not tunable thresholds.
+# Fixed measurement grids are data-design choices, not candidate signal thresholds.
 BASELINE_SNAPSHOT_OFFSETS = (14400, 10080, 7200, 4320, 2880, 1440, 720, 480, 360, 180, 60, 0)
-CONTINUATION_HORIZONS = (15,)
-FRESH_EVIDENCE_CUTOFF = date(2026, 1, 1)
-
-PREREGISTERED_HYPOTHESES: dict[str, Any] = {
-    "version": "v7_8h_baseline_aligned_hypotheses_1",
-    "created_before_fresh_period_is_opened": True,
-    "target_event": "saleable >=25% low-to-later-high rise within a conservative 480-minute rolling window",
-    "primary_evaluation_snapshot": "baseline_start (offset 0; bars end one minute before baseline)",
-    "hypotheses": [
-        {
-            "id": "H1_WEAK_BASE_IGNITION",
-            "description": "Weak/flat prior week followed by one-day price and volume ignition.",
-            "rule": (
-                "ret_prior_1d_to_7d_pct <= 5 AND ret_1440m_pct >= 5 AND "
-                "volume_last1d_vs_prior2d_daily_rate >= 1.5"
-            ),
-        },
-        {
-            "id": "H2_RELATIVE_ACCELERATION",
-            "description": "Coin-specific one-day strength and acceleration relative to BTC/ETH/BNB proxy.",
-            "rule": (
-                "ret_1440m_minus_market_proxy_pct_points >= 5 AND "
-                "return_acceleration_1d_vs_prior_2d_pct_points_per_day >= 5"
-            ),
-        },
-        {
-            "id": "H3_VOLATILITY_REVERSAL",
-            "description": "Volatility activation after a weak/flat prior week.",
-            "rule": "volatility_1d_to_7d_ratio >= 0.4 AND ret_prior_1d_to_7d_pct <= 5",
-        },
-    ],
-    "frozen_continuation_trigger": {
-        "horizon_minutes_before_cross": 15,
-        "entry_liquidity_required": True,
-        "at_least_three_of": [
-            "ret_15m_pct >= 0.9",
-            "quote_volume_15m_vs_prior_7d_same_time >= 12",
-            "position_in_1440m_range >= 0.74",
-            "max_runup_15m_pct >= 3.3",
-        ],
-    },
-    "integrity": [
-        "No threshold may be changed after fresh discovery is inspected.",
-        "Validation may be opened once after candidate selection is frozen.",
-        "Sealed test remains unopened until the complete context-plus-trigger rule is frozen.",
-        "All columns beginning outcome_ are excluded from predictors.",
-    ],
-}
-
+PRE_CROSS_HORIZONS = (15, 30, 60, 120, 180, 480)
 
 def _event_cross_minute(event: dict[str, Any]) -> datetime:
     return floor_minute(parse_datetime(event.get("first_cross_trade_time") or event["first_cross_time"]))
@@ -187,52 +139,6 @@ def add_baseline_derived_features(row: dict[str, Any]) -> None:
         row["trade_count_last1d_vs_prior2d_daily_rate"] = None
 
 
-def evaluate_preregistered_hypotheses(row: dict[str, Any]) -> dict[str, bool | None]:
-    def complete(*values: Any) -> bool:
-        return all(value is not None and np.isfinite(float(value)) for value in values)
-
-    prior_week = row.get("ret_prior_1d_to_7d_pct")
-    ret_1d = row.get("ret_1440m_pct")
-    volume_ratio = row.get("volume_last1d_vs_prior2d_daily_rate")
-    relative = row.get("ret_1440m_minus_market_proxy_pct_points")
-    acceleration = row.get("return_acceleration_1d_vs_prior_2d_pct_points_per_day")
-    vol_ratio = row.get("volatility_1d_to_7d_ratio")
-    return {
-        "hypothesis_h1_weak_base_ignition": (
-            bool(float(prior_week) <= 5 and float(ret_1d) >= 5 and float(volume_ratio) >= 1.5)
-            if complete(prior_week, ret_1d, volume_ratio) else None
-        ),
-        "hypothesis_h2_relative_acceleration": (
-            bool(float(relative) >= 5 and float(acceleration) >= 5)
-            if complete(relative, acceleration) else None
-        ),
-        "hypothesis_h3_volatility_reversal": (
-            bool(float(vol_ratio) >= 0.4 and float(prior_week) <= 5)
-            if complete(vol_ratio, prior_week) else None
-        ),
-    }
-
-
-def evaluate_frozen_continuation_trigger(row: dict[str, Any]) -> dict[str, Any]:
-    components = {
-        "late_component_return": row.get("ret_15m_pct") is not None and float(row["ret_15m_pct"]) >= 0.9,
-        "late_component_volume": (
-            row.get("quote_volume_15m_vs_prior_7d_same_time") is not None
-            and float(row["quote_volume_15m_vs_prior_7d_same_time"]) >= 12.0
-        ),
-        "late_component_range_position": (
-            row.get("position_in_1440m_range") is not None and float(row["position_in_1440m_range"]) >= 0.74
-        ),
-        "late_component_runup": row.get("max_runup_15m_pct") is not None and float(row["max_runup_15m_pct"]) >= 3.3,
-    }
-    count = int(sum(bool(value) for value in components.values()))
-    return {
-        **components,
-        "late_components_passed": count,
-        "frozen_late_trigger_pass": bool(row.get("entry_liquidity_pass") and count >= 3),
-    }
-
-
 def pseudo_window_audit(frame: pd.DataFrame, sample: dict[str, Any], threshold_pct: float = 25.0) -> dict[str, Any]:
     baseline = pd.Timestamp(parse_datetime(sample["baseline_anchor_time"]))
     cross = pd.Timestamp(parse_datetime(sample["cross_anchor_time"]))
@@ -321,7 +227,6 @@ def compute_baseline_feature_row(
         }
     )
     add_baseline_derived_features(row)
-    row.update(evaluate_preregistered_hypotheses(row))
     row.update(audit or {})
     row.update(_outcome_diagnostics(frame, sample, row.get("entry_price")))
     if row.get("pseudo_window_contaminated_control"):
@@ -329,7 +234,7 @@ def compute_baseline_feature_row(
     return row
 
 
-def compute_continuation_feature_row(
+def compute_pre_cross_feature_row(
     frame: pd.DataFrame,
     *,
     sample: dict[str, Any],
@@ -351,14 +256,14 @@ def compute_continuation_feature_row(
     )
     row.update(
         {
-            "analysis_alignment": "continuation_to_cross",
+            "analysis_alignment": "pre_cross_snapshot",
             "baseline_anchor_time": sample["baseline_anchor_time"],
             "cross_anchor_time": sample["cross_anchor_time"],
             "baseline_to_cross_minutes": sample["baseline_to_cross_minutes"],
-            "continuation_horizon_minutes": int(horizon_minutes),
+            "pre_cross_horizon_minutes": int(horizon_minutes),
+            "decision_stage": "pre_cross",
         }
     )
-    row.update(evaluate_frozen_continuation_trigger(row))
     row.update(audit or {})
     if row.get("pseudo_window_contaminated_control"):
         row["feature_quality_status"] = "contaminated_control"
@@ -414,15 +319,7 @@ class BaselineContextBuilder:
             raise ValueError("25% baseline context requires a 480-minute v1_25pct_rolling_8h source scan")
         if int(matched_job.get("contamination_after_minutes") or 0) < 480:
             raise ValueError(
-                "Fresh V7 evidence requires at least 480 minutes of post-anchor contamination protection"
-            )
-        end_value = scan.get("window_end_date_exclusive")
-        if not end_value:
-            raise ValueError("Fresh evidence requires an explicit historical scan window")
-        end_day = date.fromisoformat(str(end_value))
-        if end_day > FRESH_EVIDENCE_CUTOFF:
-            raise ValueError(
-                f"Fresh evidence must end on or before {FRESH_EVIDENCE_CUTOFF.isoformat()} to remain separate from the opened January-February and May-July datasets"
+                "Fresh staged evidence requires at least 480 minutes of post-anchor contamination protection"
             )
 
     def run(self, job: dict[str, Any]) -> dict[str, Any]:
@@ -430,15 +327,15 @@ class BaselineContextBuilder:
         matched_job_id = str(job["matched_control_job_id"])
         prior_days = int(job.get("prior_days") or 10)
         if prior_days != 10:
-            raise ValueError("Version 7 is preregistered for exactly 10 context days")
+            raise ValueError("This release uses exactly 10 context days")
         offsets = tuple(int(value) for value in (job.get("snapshot_offsets_minutes") or BASELINE_SNAPSHOT_OFFSETS))
         if offsets != BASELINE_SNAPSHOT_OFFSETS:
-            raise ValueError("Version 7 snapshot offsets are fixed and may not be retuned")
-        continuation_horizons = tuple(
-            int(value) for value in (job.get("continuation_horizons_minutes") or CONTINUATION_HORIZONS)
+            raise ValueError("Baseline snapshot offsets are fixed measurement grid points")
+        pre_cross_horizons = tuple(
+            int(value) for value in (job.get("pre_cross_horizons_minutes") or PRE_CROSS_HORIZONS)
         )
-        if continuation_horizons != CONTINUATION_HORIZONS:
-            raise ValueError("Version 7 continuation horizon is frozen at 15 minutes")
+        if pre_cross_horizons != PRE_CROSS_HORIZONS:
+            raise ValueError("Pre-cross snapshot horizons must be 15,30,60,120,180,480 minutes")
         min_entry_notional = float(job.get("min_entry_notional") or 500)
         research_mode = str(job.get("research_mode") or "exploratory_reuse")
         if research_mode not in {"exploratory_reuse", "fresh_staged"}:
@@ -475,7 +372,7 @@ class BaselineContextBuilder:
 
         work = Path(tempfile.mkdtemp(prefix=f"baseline-context-{job_id}-", dir=self.temp_root))
         feature_rows: list[dict[str, Any]] = []
-        continuation_rows: list[dict[str, Any]] = []
+        pre_cross_rows: list[dict[str, Any]] = []
         quality_rows: list[dict[str, Any]] = []
         audit_rows: list[dict[str, Any]] = []
         source_manifest: list[dict[str, Any]] = []
@@ -560,9 +457,9 @@ class BaselineContextBuilder:
                                 "pseudo_window_contaminated_control": feature.get("pseudo_window_contaminated_control"),
                             }
                         )
-                    for horizon in continuation_horizons:
-                        continuation_rows.append(
-                            compute_continuation_feature_row(
+                    for horizon in pre_cross_horizons:
+                        pre_cross_rows.append(
+                            compute_pre_cross_feature_row(
                                 frame,
                                 sample=sample,
                                 horizon_minutes=horizon,
@@ -579,7 +476,7 @@ class BaselineContextBuilder:
                     {
                         "samples_processed": processed,
                         "feature_rows": len(feature_rows),
-                        "continuation_rows": len(continuation_rows),
+                        "pre_cross_rows": len(pre_cross_rows),
                         "failures": failures,
                         "heartbeat_at": datetime.now(timezone.utc).isoformat(),
                     },
@@ -588,13 +485,13 @@ class BaselineContextBuilder:
 
             sample_df = pd.DataFrame(samples)
             feature_df = pd.DataFrame(feature_rows)
-            continuation_df = pd.DataFrame(continuation_rows)
+            pre_cross_df = pd.DataFrame(pre_cross_rows)
             quality_df = pd.DataFrame(quality_rows)
             audit_df = pd.DataFrame(audit_rows)
             source_df = pd.DataFrame(source_manifest).drop_duplicates() if source_manifest else pd.DataFrame()
             split_df = pd.DataFrame(split_summary)
             design = {
-                "version": "v7_8h_baseline_aligned_context",
+                "version": "v1_1_chatgpt_led_baseline_context",
                 "source_matched_control_job_id": matched_job_id,
                 "source_scan_id": str(matched_job["scan_id"]),
                 "research_mode": research_mode,
@@ -603,18 +500,17 @@ class BaselineContextBuilder:
                     "Control: pseudo-baseline equal to control anchor minus its matched event's minute-level baseline-to-cross duration."
                 ),
                 "snapshot_offsets_minutes_before_baseline": list(offsets),
-                "continuation_horizons_minutes_before_cross": list(continuation_horizons),
+                "pre_cross_horizons_minutes_before_cross": list(pre_cross_horizons),
                 "context_windows_minutes_at_each_snapshot": list(CONTEXT_WINDOWS),
                 "feature_cutoff": "only fully completed one-minute bars strictly before each snapshot time",
                 "control_audit": "controls with an accidental 25% sequential low-to-later-high move inside the pseudo-window are flagged contaminated_control",
                 "symmetry_note": "baseline and pseudo-baseline are minute-level for both events and controls; exact event trade prices are metadata/outcomes only",
                 "retrospective_alignment_warning": "The baseline is known retrospectively. Baseline-aligned association does not by itself specify when a live scanner would alert; any surviving rule must later be evaluated at every completed minute.",
-                "fresh_evidence_cutoff_exclusive_max": FRESH_EVIDENCE_CUTOFF.isoformat(),
                 "outcome_columns_rule": "columns beginning outcome_ are labels/diagnostics and must never be predictors",
                 "research_integrity": (
-                    "Existing May-July observations are exploratory only."
+                    "This package is exploratory and may be used only for ChatGPT-led hypothesis generation."
                     if research_mode == "exploratory_reuse"
-                    else "Hypotheses fixed before the earlier historical period; open discovery first, validation once, sealed only after complete freeze."
+                    else "Open discovery first; ChatGPT freezes candidate rules before one validation pass; sealed_test remains closed until the complete rule is frozen."
                 ),
                 "cluster_warning": "Rows are clustered by symbol and matched event; row count is not independent sample size.",
             }
@@ -623,7 +519,7 @@ class BaselineContextBuilder:
                 "events_total": int(sum(row["label"] == 1 for row in samples)),
                 "controls_total": int(sum(row["label"] == 0 for row in samples)),
                 "baseline_feature_rows": len(feature_rows),
-                "continuation_rows": len(continuation_rows),
+                "pre_cross_rows": len(pre_cross_rows),
                 "quality_counts": quality_df["feature_quality_status"].value_counts(dropna=False).to_dict() if not quality_df.empty else {},
                 "contaminated_controls": int(
                     audit_df.loc[audit_df["sample_type"] == "control", "pseudo_window_contaminated_control"].fillna(False).sum()
@@ -660,20 +556,18 @@ class BaselineContextBuilder:
                 return storage_path
 
             def write_package(folder: Path, sample_part: pd.DataFrame, feature_part: pd.DataFrame,
-                              continuation_part: pd.DataFrame, quality_part: pd.DataFrame,
+                              pre_cross_part: pd.DataFrame, quality_part: pd.DataFrame,
                               audit_part: pd.DataFrame, readme: str) -> None:
                 folder.mkdir(parents=True, exist_ok=True)
                 sample_part.to_csv(folder / "sample_anchors.csv", index=False)
                 feature_part.to_csv(folder / "baseline_context_features.csv", index=False)
                 feature_part.to_parquet(folder / "baseline_context_features.parquet", index=False, compression="zstd")
-                continuation_part.to_csv(folder / "continuation_trigger_features.csv", index=False)
-                continuation_part.to_parquet(folder / "continuation_trigger_features.parquet", index=False, compression="zstd")
+                pre_cross_part.to_csv(folder / "pre_cross_snapshot_features.csv", index=False)
+                pre_cross_part.to_parquet(folder / "pre_cross_snapshot_features.parquet", index=False, compression="zstd")
                 quality_part.to_csv(folder / "data_quality.csv", index=False)
                 audit_part.to_csv(folder / "control_contamination_audit.csv", index=False)
-                (folder / "preregistered_hypotheses.json").write_text(
-                    json.dumps(PREREGISTERED_HYPOTHESES, indent=2, default=_json_ready), encoding="utf-8"
-                )
                 (folder / "design.json").write_text(json.dumps(design, indent=2, default=_json_ready), encoding="utf-8")
+                write_analysis_contract(folder, "baseline_context_package")
                 (folder / "README.txt").write_text(readme, encoding="utf-8")
 
             package_paths: dict[str, str] = {}
@@ -683,10 +577,10 @@ class BaselineContextBuilder:
                     folder,
                     sample_df,
                     feature_df,
-                    continuation_df,
+                    pre_cross_df,
                     quality_df,
                     audit_df,
-                    "EXPLORATORY ONLY. The May-July source data were already opened. Use this package to audit baseline alignment and refine implementation, not to prove a rule.\n",
+                    "EXPLORATORY ONLY. Split-sealing is not enforced in this package. Use it for ChatGPT-led discovery or implementation audit, not final confirmation.\n",
                 )
                 path = work / "baseline_context_exploratory.zip"
                 _zip_directory(folder, path)
@@ -698,11 +592,11 @@ class BaselineContextBuilder:
                         folder,
                         sample_df[sample_df["split"] == split].copy(),
                         feature_df[feature_df["split"] == split].copy(),
-                        continuation_df[continuation_df["split"] == split].copy(),
+                        pre_cross_df[pre_cross_df["split"] == split].copy(),
                         quality_df[quality_df["split"] == split].copy(),
                         audit_df[audit_df["split"] == split].copy(),
                         f"Baseline-aligned {split} package.\n" + (
-                            "DO NOT OPEN UNTIL THE COMPLETE CONTEXT-PLUS-CONTINUATION RULE IS FROZEN.\n"
+                            "DO NOT OPEN UNTIL THE COMPLETE CHATGPT-DISCOVERED RULE IS FROZEN.\n"
                             if split == "sealed_test" else ""
                         ),
                     )
@@ -716,23 +610,9 @@ class BaselineContextBuilder:
             source_df.to_csv(index / "source_archive_manifest.csv", index=False)
             audit_df.to_csv(index / "control_contamination_audit.csv", index=False)
             (index / "design.json").write_text(json.dumps(design, indent=2, default=_json_ready), encoding="utf-8")
-            (index / "preregistered_hypotheses.json").write_text(
-                json.dumps(PREREGISTERED_HYPOTHESES, indent=2, default=_json_ready), encoding="utf-8"
-            )
             (index / "quality_report.json").write_text(json.dumps(quality_report, indent=2, default=_json_ready), encoding="utf-8")
             pd.DataFrame(uploaded).to_csv(index / "package_manifest.csv", index=False)
-            (index / "ANALYSIS_GUARDRAILS.md").write_text(
-                "# Guardrails\n\n"
-                "1. Use only offset-0 rows for the three preregistered precursor hypotheses.\n"
-                "2. Exclude all columns beginning `outcome_` from predictors.\n"
-                "3. Exclude controls flagged `pseudo_window_contaminated_control`.\n"
-                "4. Existing May-July data are exploratory only.\n"
-                "5. For fresh staged data, open discovery first; freeze selection before validation; freeze the complete rule before sealed test.\n"
-                "6. Do not change the frozen 15-minute continuation trigger.\n"
-                "7. Cluster inference by symbol and matched event.\n"
-                "8. No association becomes a trade until a continuous executable-entry backtest passes.\n",
-                encoding="utf-8",
-            )
+            write_analysis_contract(index, "baseline_context_index")
             index_path = work / "baseline_context_index.zip"
             _zip_directory(index, index_path)
             index_storage = upload(index_path, "baseline_context_index")
@@ -742,7 +622,7 @@ class BaselineContextBuilder:
                 "events_total": int(sum(row["label"] == 1 for row in samples)),
                 "controls_total": int(sum(row["label"] == 0 for row in samples)),
                 "feature_rows": len(feature_rows),
-                "continuation_rows": len(continuation_rows),
+                "pre_cross_rows": len(pre_cross_rows),
                 "failures": failures,
                 "research_mode": research_mode,
                 "index_storage_path": index_storage,

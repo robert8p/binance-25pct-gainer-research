@@ -13,6 +13,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from .analysis_contract import write_analysis_contract
 from .binance import BinanceClient, sha256_file
 from .matched_controls import (
     MinuteArchiveCache,
@@ -169,40 +170,65 @@ def _daily_context(frame: pd.DataFrame, end_open: pd.Timestamp) -> dict[str, Any
 
 
 def _episode_features(frame: pd.DataFrame, end_open: pd.Timestamp) -> dict[str, Any]:
+    """Continuous ten-day distribution summaries without candidate-signal cut-offs."""
     segment = _segment(frame, end_open, 14400)
     observed = segment[segment["observed"]].copy()
     if observed.empty:
         return {}
+
     closes = observed["close"].astype(float)
-    minute_returns = closes.pct_change() * 100.0
+    minute_returns = closes.pct_change().replace([np.inf, -np.inf], np.nan).dropna() * 100.0
     hourly = observed.resample("1h").agg(
+        open=("open", "first"),
         high=("high", "max"),
         low=("low", "min"),
         close=("close", "last"),
         quote_volume=("quote_volume", "sum"),
+        trades=("trade_count", "sum"),
         minutes=("observed", "sum"),
     )
-    hourly = hourly[hourly["minutes"] > 0]
-    median_hourly_volume = float(hourly["quote_volume"].median()) if not hourly.empty else None
-    prior_24h_high = hourly["high"].shift(1).rolling(24, min_periods=18).max()
-    breakout = hourly["high"] >= prior_24h_high * 1.005
-    breakout_episodes = breakout & ~breakout.shift(1, fill_value=False)
-    failed = 0
-    for ts in hourly.index[breakout_episodes.fillna(False)]:
-        breakout_price = float(hourly.at[ts, "high"])
-        later = hourly.loc[ts : ts + pd.Timedelta(hours=6)]
-        if not later.empty and float(later["close"].min()) <= breakout_price * 0.98:
-            failed += 1
-    return {
-        "one_minute_up_moves_ge_2pct_10d": int((minute_returns >= 2.0).sum()),
-        "one_minute_up_moves_ge_5pct_10d": int((minute_returns >= 5.0).sum()),
-        "one_minute_down_moves_le_minus2pct_10d": int((minute_returns <= -2.0).sum()),
-        "hourly_volume_spikes_ge_3x_median_10d": int((hourly["quote_volume"] >= 3.0 * median_hourly_volume).sum()) if median_hourly_volume and median_hourly_volume > 0 else None,
-        "maximum_hourly_volume_vs_median_10d": float(hourly["quote_volume"].max() / median_hourly_volume) if median_hourly_volume and median_hourly_volume > 0 else None,
-        "breakout_episode_count_10d": int(breakout_episodes.fillna(False).sum()),
-        "failed_breakout_count_10d": int(failed),
+    hourly = hourly[hourly["minutes"] > 0].copy()
+    hourly_returns = hourly["close"].pct_change().replace([np.inf, -np.inf], np.nan).dropna() * 100.0
+
+    result: dict[str, Any] = {
+        "observed_minutes_10d": int(len(observed)),
+        "observed_hours_10d": int(len(hourly)),
     }
 
+    def add_distribution(prefix: str, values: pd.Series) -> None:
+        clean = pd.to_numeric(values, errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
+        if clean.empty:
+            return
+        result[f"{prefix}_mean"] = float(clean.mean())
+        result[f"{prefix}_std"] = float(clean.std(ddof=1)) if len(clean) > 1 else 0.0
+        result[f"{prefix}_skew"] = float(clean.skew()) if len(clean) > 2 else None
+        result[f"{prefix}_min"] = float(clean.min())
+        result[f"{prefix}_p01"] = float(clean.quantile(0.01))
+        result[f"{prefix}_p05"] = float(clean.quantile(0.05))
+        result[f"{prefix}_p25"] = float(clean.quantile(0.25))
+        result[f"{prefix}_median"] = float(clean.median())
+        result[f"{prefix}_p75"] = float(clean.quantile(0.75))
+        result[f"{prefix}_p95"] = float(clean.quantile(0.95))
+        result[f"{prefix}_p99"] = float(clean.quantile(0.99))
+        result[f"{prefix}_max"] = float(clean.max())
+        result[f"{prefix}_positive_fraction"] = float((clean > 0).mean())
+
+    add_distribution("minute_return_pct_10d", minute_returns)
+    add_distribution("hourly_return_pct_10d", hourly_returns)
+    add_distribution("hourly_quote_volume_10d", hourly["quote_volume"])
+    add_distribution("hourly_trade_count_10d", hourly["trades"])
+
+    if not hourly.empty:
+        median_volume = float(hourly["quote_volume"].median())
+        result["maximum_hourly_volume_vs_median_10d"] = (
+            float(hourly["quote_volume"].max() / median_volume) if median_volume > 0 else None
+        )
+        prior_24h_high = hourly["high"].shift(1).rolling(24, min_periods=18).max()
+        result["new_rolling_24h_high_count_10d"] = int((hourly["high"] >= prior_24h_high).fillna(False).sum())
+        distance = (hourly["close"] / prior_24h_high - 1.0) * 100.0
+        add_distribution("close_vs_prior_24h_high_pct_10d", distance)
+
+    return result
 
 def _same_time_features(frame: pd.DataFrame, end_open: pd.Timestamp) -> dict[str, Any]:
     result: dict[str, Any] = {}
@@ -423,7 +449,7 @@ class TenDayContextBuilder:
         matched_job_id = str(job["matched_control_job_id"])
         prior_days = int(job.get("prior_days") or 10)
         if prior_days != 10:
-            raise ValueError("Version 4 is preregistered for exactly 10 days of context")
+            raise ValueError("This release uses exactly 10 days of context")
         horizons = tuple(sorted({int(value) for value in (job.get("horizons_minutes") or [15, 30, 60, 120])}))
         min_entry_notional = float(job.get("min_entry_notional") or 500)
         research_mode = str(job.get("research_mode") or "exploratory_reuse")
@@ -527,7 +553,7 @@ class TenDayContextBuilder:
             source_df = pd.DataFrame(source_manifest)
             split_df = pd.DataFrame(split_summary)
             design = {
-                "version": "v4_ten_day_context",
+                "version": "v1_1_chatgpt_led_ten_day_context",
                 "source_matched_control_job_id": matched_job_id,
                 "source_scan_id": str(matched_job["scan_id"]),
                 "research_mode": research_mode,
@@ -540,7 +566,7 @@ class TenDayContextBuilder:
                     "volume, trade intensity, average trade size and taker-buy balance",
                     "volatility compression and expansion",
                     "daily trend and acceleration",
-                    "breakout and failed-breakout episode counts",
+                    "continuous ten-day return and activity distributions",
                     "same-clock-time activity shifts",
                     "relative strength versus BTC, ETH, BNB and their equal-weight proxy",
                     "data completeness and executable-entry liquidity",
@@ -549,7 +575,7 @@ class TenDayContextBuilder:
                 "research_integrity": (
                     "All outputs are exploratory because the source splits have already been opened."
                     if research_mode == "exploratory_reuse"
-                    else "Discovery first; validation once after preregistration; sealed_test only after final rule freeze."
+                    else "Discovery first; ChatGPT freezes candidate rules before one validation pass; sealed_test remains closed until the complete rule is frozen."
                 ),
                 "cluster_warning": "Rows are clustered by symbol and matched event; row count is not independent sample size.",
             }
@@ -593,8 +619,9 @@ class TenDayContextBuilder:
                 feature_df.to_parquet(folder / "ten_day_context_features.parquet", index=False, compression="zstd")
                 quality_df.to_csv(folder / "data_quality.csv", index=False)
                 (folder / "design.json").write_text(json.dumps(design, indent=2, default=_json_ready), encoding="utf-8")
+                write_analysis_contract(folder, "ten_day_context_exploratory")
                 (folder / "README.txt").write_text(
-                    "EXPLORATORY ONLY. The underlying discovery, validation and sealed data were previously opened, so this package cannot prove newly created ten-day rules.\n",
+                    "EXPLORATORY ONLY. Split-sealing is not enforced in this package. Use it for ChatGPT-led discovery or implementation audit, not final confirmation.\n",
                     encoding="utf-8",
                 )
                 path = work / "ten_day_context_exploratory.zip"
@@ -611,7 +638,8 @@ class TenDayContextBuilder:
                     split_features.to_csv(folder / "ten_day_context_features.csv", index=False)
                     split_features.to_parquet(folder / "ten_day_context_features.parquet", index=False, compression="zstd")
                     split_quality.to_csv(folder / "data_quality.csv", index=False)
-                    (folder / "preregistered_design.json").write_text(json.dumps(design, indent=2, default=_json_ready), encoding="utf-8")
+                    (folder / "research_design.json").write_text(json.dumps(design, indent=2, default=_json_ready), encoding="utf-8")
+                    write_analysis_contract(folder, f"ten_day_context_{split}")
                     (folder / "README.txt").write_text(
                         f"Ten-day context {split} package.\n" + ("DO NOT OPEN UNTIL FINAL RULES ARE FROZEN.\n" if split == "sealed_test" else ""),
                         encoding="utf-8",
@@ -627,10 +655,7 @@ class TenDayContextBuilder:
             (index / "design.json").write_text(json.dumps(design, indent=2, default=_json_ready), encoding="utf-8")
             (index / "quality_report.json").write_text(json.dumps(quality_report, indent=2, default=_json_ready), encoding="utf-8")
             pd.DataFrame(uploaded).to_csv(index / "package_manifest.csv", index=False)
-            (index / "ANALYSIS_GUARDRAILS.md").write_text(
-                "# Guardrails\n\n1. Exclude every column beginning `outcome_` from predictors.\n2. Treat existing/opened data as exploratory only.\n3. For fresh staged data, fix candidate rules before validation and do not retune after validation.\n4. Keep the sealed package unopened until the complete rule is frozen.\n5. Cluster inference by symbol and event.\n6. A context association is not a trade until continuously backtested with executable entries and fixed exits.\n",
-                encoding="utf-8",
-            )
+            write_analysis_contract(index, "ten_day_context_index")
             index_path = work / "ten_day_context_index.zip"
             _zip_directory(index, index_path)
             index_storage = upload(index_path, "ten_day_context_index", None)

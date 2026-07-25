@@ -14,7 +14,7 @@ from fastapi.templating import Jinja2Templates
 from .config import Settings
 from .supabase import SupabaseClient
 
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 EVENT_DEFINITION_VERSION = "v1_25pct_rolling_8h"
 FIXED_THRESHOLD_PCT = 25.0
 FIXED_WINDOW_MINUTES = 480
@@ -234,7 +234,7 @@ def create_matched_controls(
 def create_ten_day_context(
     request: Request,
     matched_control_job_id: str = Form(...),
-    research_mode: str = Form("exploratory_reuse"),
+    research_mode: str = Form("fresh_staged"),
     horizons_minutes: str = Form("15,30,60,120,180,480"),
     min_entry_notional: float = Form(500),
 ) -> RedirectResponse:
@@ -269,7 +269,7 @@ def create_ten_day_context(
 def create_baseline_context(
     request: Request,
     matched_control_job_id: str = Form(...),
-    research_mode: str = Form("exploratory_reuse"),
+    research_mode: str = Form("fresh_staged"),
     min_entry_notional: float = Form(500),
 ) -> RedirectResponse:
     _auth(request)
@@ -286,7 +286,7 @@ def create_baseline_context(
             "research_mode": research_mode,
             "prior_days": 10,
             "snapshot_offsets_minutes": [14400,10080,7200,4320,2880,1440,720,480,360,180,60,0],
-            "continuation_horizons_minutes": [15],
+            "pre_cross_horizons_minutes": [15,30,60,120,180,480],
             "min_entry_notional": min_entry_notional,
         },
     )

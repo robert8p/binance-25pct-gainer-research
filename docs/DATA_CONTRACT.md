@@ -1,25 +1,21 @@
-# Data contract — Binance 25% research V1
+# Data contract — Binance 25% research V1.1
 
 ## Event
 
 A saleable event is the earliest later one-minute high at least **25%** above the latest occurrence of the lowest prior one-minute low in a conservative **480-minute** rolling window.
 
-Default saleability requires at least **500 quote units** of seller-initiated execution at any price during the **300 seconds** after the exact crossing trade. This tests whether the position could be sold, not whether it could be sold at the threshold price.
+Default saleability requires at least **500 quote units** of seller-initiated execution at any price during the **300 seconds** after the exact crossing trade. This tests whether a position could be sold, not whether it could be sold at the threshold price.
 
 ## Controls
 
-Each event is paired with same-symbol historical controls where available. At each control decision time:
+Each event is paired with same-symbol historical controls where available. At each control decision time, the application uses prior completed bars only, rejects 25%-contaminated windows, applies the configured pre-decision liquidity floor and preserves chronological splits.
 
-- use the applicable prior completed bars only;
-- require the same 480-minute event framework;
-- reject windows contaminated by a 25% crossing;
-- require the configured pre-decision liquidity floor;
-- keep discovery, validation and sealed-test splits separate.
+## Neutral measurements
 
-## Context
+The application may calculate continuous returns, ranges, volume, trade intensity, volatility, market-relative measurements, distribution summaries, data-quality diagnostics and execution-liquidity fields. It must not turn those measurements into hypotheses, pass/fail signal components, scores or trading rules.
 
-Ten-day and baseline-aligned feature rows must end at or before their stated decision timestamp. Outcome fields must remain separately labelled and must not leak into predictors.
+Ten-day and baseline-aligned feature rows end before their stated decision timestamp. Every column beginning `outcome_` is a label or diagnostic and must not be used as a predictor.
 
 ## Research boundary
 
-No confirmation signal or trading rule is frozen in this release. A rule must first be discovered and historically validated specifically on the 25% event population.
+ChatGPT is the pattern-discovery engine. No 25%-specific confirmation signal or trading rule is frozen in this release.

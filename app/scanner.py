@@ -38,6 +38,12 @@ class Scanner:
         lookback = int(job.get("lookback_days") or 60)
         threshold_pct = float(job.get("threshold_pct") or 25)
         window_minutes = int(job.get("window_minutes") or 480)
+        if event_definition_version != "v1_25pct_rolling_8h":
+            raise ValueError("This deployment accepts only v1_25pct_rolling_8h scan jobs")
+        if abs(threshold_pct - 25.0) > 1e-12:
+            raise ValueError("This deployment accepts only the fixed 25% event threshold")
+        if window_minutes != 480:
+            raise ValueError("This deployment accepts only the fixed 480-minute event window")
         min_exit = float(job["min_exit_notional"])
         confirmation_seconds = int(job["confirmation_window_seconds"])
         quote_assets = [x.strip().upper() for x in (job.get("quote_assets") or ["USDT"]) if x.strip()]

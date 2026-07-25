@@ -16,6 +16,7 @@ from typing import Any, Iterable
 import numpy as np
 import pandas as pd
 
+from .analysis_contract import write_analysis_contract
 from .binance import BinanceClient, archive_url, download_archive, normalize_archive_timestamp, sha256_file
 from .supabase import SupabaseClient
 
@@ -1013,7 +1014,7 @@ class MatchedControlBuilder:
             split_df = pd.DataFrame(split_summary)
 
             design = {
-                "version": "v7_matched_controls_8h",
+                "version": "v1_1_chatgpt_led_matched_controls",
                 "source_scan_id": scan_id,
                 "event_definition": "25% low-to-later-high crossing within conservative 480-minute rolling window",
                 "positive_sample": "saleable scanner event anchored to the exact crossing trade where available",
@@ -1038,7 +1039,7 @@ class MatchedControlBuilder:
                 },
                 "split_method": "chronological UTC event dates; a date is never divided across splits; controls stay in their event split",
                 "independence_warning": "observations are clustered by coin, event and overlapping time; row counts are not independent sample counts",
-                "sealed_test_rule": "do not inspect sealed_test features until candidate rules and thresholds are preregistered",
+                "sealed_test_rule": "do not inspect sealed_test features until ChatGPT has frozen the complete candidate rule",
             }
             quality_report = {
                 "events_total": len(events),
@@ -1095,14 +1096,15 @@ class MatchedControlBuilder:
                 split_features.to_parquet(folder / "feature_matrix.parquet", index=False, compression="zstd")
                 split_matches.to_csv(folder / "control_matches.csv", index=False)
                 split_quality.to_csv(folder / "data_quality.csv", index=False)
-                (folder / "preregistered_design.json").write_text(json.dumps(design, indent=2, default=_json_ready), encoding="utf-8")
+                (folder / "research_design.json").write_text(json.dumps(design, indent=2, default=_json_ready), encoding="utf-8")
+                write_analysis_contract(folder, f"matched_control_{split}")
                 (folder / "README.txt").write_text(
                     (
                         f"Binance matched-control {split} package.\n"
                         "Each event is paired with same-symbol non-surge controls.\n"
-                        "Feature rows are repeated at the preregistered decision horizons.\n"
+                        "Feature rows are repeated at the fixed measurement horizons.\n"
                         "All predictors use only fully completed one-minute bars before decision_time.\n"
-                        + ("DO NOT INSPECT THIS PACKAGE UNTIL RULES ARE PREREGISTERED.\n" if split == "sealed_test" else "")
+                        + ("DO NOT INSPECT THIS PACKAGE UNTIL THE COMPLETE CHATGPT-DISCOVERED RULE IS FROZEN.\n" if split == "sealed_test" else "")
                     ),
                     encoding="utf-8",
                 )
@@ -1125,12 +1127,9 @@ class MatchedControlBuilder:
                     for split in SPLITS
                 ]
             ).to_csv(index_folder / "package_manifest.csv", index=False)
-            (index_folder / "preregistered_design.json").write_text(json.dumps(design, indent=2, default=_json_ready), encoding="utf-8")
+            (index_folder / "research_design.json").write_text(json.dumps(design, indent=2, default=_json_ready), encoding="utf-8")
             (index_folder / "quality_report.json").write_text(json.dumps(quality_report, indent=2, default=_json_ready), encoding="utf-8")
-            (index_folder / "ANALYSIS_GUARDRAILS.md").write_text(
-                """# Analysis guardrails\n\n1. Use discovery data to generate hypotheses and thresholds.\n2. Use validation once to reject or retain preregistered candidates; do not retune on validation.\n3. Do not inspect sealed_test until the rule, threshold, direction, holding period and exclusions are fixed.\n4. Cluster inference by event and symbol; matched controls are not independent rows.\n5. Analyse each decision horizon separately before any multiplicity adjustment.\n6. A feature association is not a trade until entry liquidity, fees, slippage and exit rules are tested.\n""",
-                encoding="utf-8",
-            )
+            write_analysis_contract(index_folder, "matched_control_index")
             (index_folder / "README.txt").write_text(
                 "This index intentionally excludes all split feature matrices. Download discovery first, validation only after candidates are fixed, and sealed_test last.\n",
                 encoding="utf-8",

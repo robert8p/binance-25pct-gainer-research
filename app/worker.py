@@ -182,7 +182,7 @@ def main() -> None:
                             "completed_at": datetime.now(timezone.utc).isoformat(),
                             "samples_processed": result["samples_processed"],
                             "feature_rows": result["feature_rows"],
-                            "continuation_rows": result["continuation_rows"],
+                            "pre_cross_rows": result["pre_cross_rows"],
                             "failures": result["failures"],
                             "result_json": result,
                         },

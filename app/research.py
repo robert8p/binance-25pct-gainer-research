@@ -13,6 +13,7 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from .analysis_contract import write_analysis_contract
 from .binance import (
     BinanceClient,
     archive_url,
@@ -197,6 +198,7 @@ class ResearchBuilder:
             (index_dir / "research_job.json").write_text(
                 json.dumps(job, indent=2, default=str), encoding="utf-8"
             )
+            write_analysis_contract(index_dir, "event_archive_index")
             (index_dir / "README.txt").write_text(
                 "Binance rolling eight-hour >=25% surge research index. Event-day predictor data ends before the first threshold-crossing minute.\n"
                 "Historical saleability is inferred from executed seller-initiated aggregate trades at any post-crossing price, not displayed order-book depth.\n",
@@ -354,6 +356,7 @@ class ResearchBuilder:
                 "Large data files are uploaded separately and deleted from the worker immediately. "
                 "The compact event ZIP contains metadata and the file manifest only."
             )
+            write_analysis_contract(event_root, "event_archive_compact")
             metadata_path = event_root / "metadata" / "event_metadata.json"
             metadata_path.write_text(json.dumps(metadata, indent=2, default=str), encoding="utf-8")
             manifest.append(self._file_record(metadata_path, event_root, role="metadata"))
