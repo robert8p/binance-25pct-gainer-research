@@ -1,0 +1,79 @@
+{
+  "version": "1.0",
+  "status": "reference_only_from_50pct_source_not_validated_for_25pct",
+  "sealed_test_opened": true,
+  "candidate_count": 2,
+  "primary_cohort": "cohort_primary_clean",
+  "sensitivity_cohorts": [
+    "cohort_core_usable",
+    "exclude_positive_symbols_seen_in_discovery_or_validation"
+  ],
+  "rules": [
+    {
+      "rule_id": "PREOPEN_ACTIVITY_LIQUIDITY_VOLATILITY_V1",
+      "decision_cutoff": "preopen_1400_bst",
+      "decision_time_london": "14:00",
+      "purpose": "Rank candidates; higher is better",
+      "features": [
+        {
+          "name": "log1p_snapshot_trade_volume",
+          "source": "log1p(snapshot_trade_volume)",
+          "mean": 8.183824,
+          "standard_deviation": 4.74614788,
+          "sign": 1
+        },
+        {
+          "name": "log1p_snapshot_median_spread_bps",
+          "source": "log1p(snapshot_median_spread_bps)",
+          "mean": 6.35332542,
+          "standard_deviation": 1.52922959,
+          "sign": -1
+        },
+        {
+          "name": "snapshot_realized_volatility_second_log",
+          "source": "snapshot_realized_volatility_second_log",
+          "mean": 0.18287512,
+          "standard_deviation": 0.22326549,
+          "sign": 1
+        }
+      ],
+      "formula": "mean(sign_i * (feature_i - mean_i) / standard_deviation_i)",
+      "secondary_threshold": -0.007082378439967338,
+      "primary_metric": "matched_pair_auc",
+      "sealed_pass": {
+        "matched_pair_auc_minimum": 0.7,
+        "one_sided_matched_permutation_p_maximum": 0.025,
+        "direction_must_match_in_core_usable": true
+      }
+    },
+    {
+      "rule_id": "MIDDAY_RETURN_FROM_PRIOR_CLOSE_V1",
+      "decision_cutoff": "midday_1700_bst",
+      "decision_time_london": "17:00",
+      "purpose": "Rank candidates by return; secondary absolute screen",
+      "ranking_feature": "snapshot_return_from_prior_close_pct",
+      "ranking_direction": "descending",
+      "secondary_threshold_pct": 13.776879223878035,
+      "primary_metric": "matched_pair_auc",
+      "sealed_pass": {
+        "matched_pair_auc_minimum": 0.7,
+        "one_sided_matched_permutation_p_maximum": 0.025,
+        "direction_must_match_in_core_usable": true
+      }
+    }
+  ],
+  "prohibited_after_sealed_open": [
+    "changing features",
+    "changing feature signs",
+    "changing scaling constants",
+    "changing thresholds",
+    "adding a 19:00 candidate",
+    "selecting a subgroup because it performs better",
+    "opening predictor columns before the scoring code is fixed"
+  ],
+  "next_stage_if_passed": "execution-aware profitability backtest using full-universe candidates, realistic asks, bids, slippage, halts and time-based exits",
+  "decision_if_failed": "no rule and no trade",
+  "research_target_pct": 50,
+  "fork_target_pct": 25,
+  "warning": "Do not enable Step 5 in the 25% fork until a new 25%-specific rule file is frozen before opening its sealed test."
+}

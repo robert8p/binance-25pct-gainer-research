@@ -1,39 +1,36 @@
-# Binance 25% Frozen C2/C4 External Validation — V1.2.0
+# Alpaca 25% Gainer Research Lab V4.0.1
 
-This is a dedicated historical validation release. It does **not** discover patterns.
+This package is a **25% research fork** rebuilt from the attached Alpaca 50% Execution Backtester V4.0.0. It preserves the source architecture and the first four research stages while changing the event definition and execution target from +50% to **+25% versus the previous split-adjusted regular-session close**.
 
-ChatGPT previously identified and froze two provisional precursor rules. This app now:
+## Included stages
 
-1. scans a fixed non-overlapping historical period;
-2. constructs five same-symbol controls per saleable 25% event;
-3. calculates one neutral feature snapshot exactly 480 minutes before each event/control anchor;
-4. mechanically evaluates C2 and C4 without changing them;
-5. packages the raw evidence and results for independent reproduction in ChatGPT.
+1. Full-universe 90-day +25% event discovery using split-adjusted daily bars and regular-session one-minute verification.
+2. Sellability and exact-tick research collection.
+3. Strict matched non-hit controls whose event-day high remains below 125% of prior close.
+4. Entry-feasibility reconstruction and discovery/validation/sealed-test exports.
+5. Execution-aware backtest engine retained from the source package, with its profit target changed to 125% of prior close.
 
-## Fixed period
+## Important scientific safeguard
 
-- Start: `2026-01-01` UTC, inclusive
-- End: `2026-05-26` UTC, exclusive
-- Human-readable coverage: 1 January through 25 May 2026
+**Step 5 is disabled by default.** The two frozen predictive rules in the attached source ZIP were discovered and sealed on +50% events. Reusing them as though they were validated for +25% events would contaminate the research. The source rule file and engine remain in the package as reference code only.
 
-## Frozen candidates
+Complete Steps 1–4 for the 25% cohort, analyse discovery and validation, freeze the 25%-specific rule before opening the sealed test, then replace the reference constants and set `ENABLE_BACKTEST_STAGE=true`.
 
-### C2
+## Isolation from the 50% app
 
-```text
-close_vs_1440m_low_pct >= 6.0
-AND quote_volume_60m_vs_prior_7d_same_time >= 3.0
-```
+- Render services are named `alpaca-25pct-scanner-web` and `alpaca-25pct-scanner-worker`.
+- Every database table is prefixed `stock25_`.
+- The storage bucket is `alpaca-25pct-research`.
+- The API rejects scan thresholds other than 25%.
 
-### C4
+## Primary event definition
 
-```text
-max_runup_720m_pct >= 10.0
-AND volatility_1d_to_7d_ratio >= 0.30
-```
+A stock-day qualifies only when its regular-session one-minute high reaches at least:
 
-The app cannot search for new rules, retune thresholds, combine C2 and C4, or inspect the prior sealed-test package.
+`previous split-adjusted regular-session close × 1.25`
 
-## Upgrade
+Premarket-only or after-hours-only crossings do not qualify.
 
-Follow `DEPLOYMENT.md`. Run `supabase/migrate_v1_2_0_external_validation.sql` before deploying the new worker.
+## No trading capability
+
+The application collects and analyses historical data only. It cannot place orders.

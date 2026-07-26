@@ -1,49 +1,192 @@
 services:
   - type: web
-    name: binance-25pct-scanner-web
+    name: alpaca-25pct-scanner-web
     runtime: python
     plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn app.web:app --host 0.0.0.0 --port $PORT
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /health
+    autoDeployTrigger: commit
     envVars:
       - key: PYTHON_VERSION
-        value: 3.13.5
+        value: 3.12.8
       - key: SUPABASE_URL
         sync: false
       - key: SUPABASE_SERVICE_ROLE_KEY
         sync: false
+      - key: SUPABASE_STORAGE_BUCKET
+        value: alpaca-25pct-research
+      - key: APP_USERNAME
+        value: admin
       - key: APP_PASSWORD
         sync: false
-      - key: SUPABASE_STORAGE_BUCKET
-        value: binance-25pct-gainer-research
+      - key: SIGNED_URL_EXPIRY_SECONDS
+        value: 3600
+      - key: DEFAULT_LOOKBACK_DAYS
+        value: 90
+      - key: DEFAULT_THRESHOLD_PCT
+        value: 25
+      - key: ENABLE_BACKTEST_STAGE
+        value: false
+      - key: DEFAULT_UNIVERSE_MODE
+        value: current_tradable
+      - key: DEFAULT_FEED
+        value: sip
+      - key: DEFAULT_PRIOR_SESSIONS
+        value: 10
+      - key: DEFAULT_SELLABILITY_NOTIONAL
+        value: 500
+      - key: DEFAULT_SELLABILITY_WINDOW_SECONDS
+        value: 300
+      - key: DEFAULT_CONTROLS_PER_EVENT
+        value: 5
+      - key: DEFAULT_CONTROL_FEATURE_SESSIONS
+        value: 10
+      - key: DEFAULT_CONTROL_HISTORY_CALENDAR_DAYS
+        value: 120
+      - key: DEFAULT_MAX_CONTROL_SYMBOL_USES
+        value: 20
+      - key: DEFAULT_ENTRY_NOTIONAL
+        value: 500
+      - key: DEFAULT_ENTRY_REACTION_DELAY_SECONDS
+        value: 5
+      - key: DEFAULT_ENTRY_MINIMUM_OPPORTUNITY_SECONDS
+        value: 30
+      - key: DEFAULT_ENTRY_MINIMUM_GROSS_EDGE_PCT
+        value: 0
+      - key: DEFAULT_ENTRY_REQUIRE_SUBSEQUENT_TRADE
+        value: true
+      - key: DEFAULT_BACKTEST_POSITION_NOTIONAL
+        value: 500
+      - key: DEFAULT_BACKTEST_REACTION_DELAY_SECONDS
+        value: 5
+      - key: DEFAULT_BACKTEST_STOP_LOSS_PCT
+        value: 5
+      - key: DEFAULT_BACKTEST_SLIPPAGE_BPS
+        value: 5
+      - key: DEFAULT_BACKTEST_MAX_TRADES_PER_DAY
+        value: 5
+      - key: DEFAULT_BACKTEST_CLOSE_EXIT_MINUTES_BEFORE
+        value: 5
 
   - type: worker
-    name: binance-25pct-scanner-worker
+    name: alpaca-25pct-scanner-worker
     runtime: python
     plan: starter
     buildCommand: pip install -r requirements.txt
     startCommand: python -m app.worker
-    disk:
-      name: binance-25pct-data
-      mountPath: /var/data
-      sizeGB: 10
+    autoDeployTrigger: commit
+    maxShutdownDelaySeconds: 300
     envVars:
       - key: PYTHON_VERSION
-        value: 3.13.5
+        value: 3.12.8
+      - key: ALPACA_API_KEY
+        sync: false
+      - key: ALPACA_SECRET_KEY
+        sync: false
       - key: SUPABASE_URL
-        sync: false
+        fromService:
+          name: alpaca-25pct-scanner-web
+          type: web
+          envVarKey: SUPABASE_URL
       - key: SUPABASE_SERVICE_ROLE_KEY
-        sync: false
-      - key: APP_PASSWORD
-        sync: false
+        fromService:
+          name: alpaca-25pct-scanner-web
+          type: web
+          envVarKey: SUPABASE_SERVICE_ROLE_KEY
       - key: SUPABASE_STORAGE_BUCKET
-        value: binance-25pct-gainer-research
-      - key: MAX_STORAGE_OBJECT_BYTES
-        value: 45000000
-      - key: TEMP_DATA_DIR
-        value: /var/data
-      - key: BINANCE_API_BASE_URLS
-        value: https://api.binance.com,https://data-api.binance.vision
-      - key: POLL_SECONDS
+        value: alpaca-25pct-research
+      - key: DEFAULT_LOOKBACK_DAYS
+        value: 90
+      - key: DEFAULT_THRESHOLD_PCT
+        value: 25
+      - key: ENABLE_BACKTEST_STAGE
+        value: false
+      - key: DEFAULT_UNIVERSE_MODE
+        value: current_tradable
+      - key: DEFAULT_FEED
+        value: sip
+      - key: DEFAULT_PRIOR_SESSIONS
         value: 10
+      - key: DEFAULT_SELLABILITY_NOTIONAL
+        value: 500
+      - key: DEFAULT_SELLABILITY_WINDOW_SECONDS
+        value: 300
+      - key: DEFAULT_CONTROLS_PER_EVENT
+        value: 5
+      - key: DEFAULT_CONTROL_FEATURE_SESSIONS
+        value: 10
+      - key: DEFAULT_CONTROL_HISTORY_CALENDAR_DAYS
+        value: 120
+      - key: DEFAULT_MAX_CONTROL_SYMBOL_USES
+        value: 20
+      - key: DEFAULT_ENTRY_NOTIONAL
+        value: 500
+      - key: DEFAULT_ENTRY_REACTION_DELAY_SECONDS
+        value: 5
+      - key: DEFAULT_ENTRY_MINIMUM_OPPORTUNITY_SECONDS
+        value: 30
+      - key: DEFAULT_ENTRY_MINIMUM_GROSS_EDGE_PCT
+        value: 0
+      - key: DEFAULT_ENTRY_REQUIRE_SUBSEQUENT_TRADE
+        value: true
+      - key: DEFAULT_BACKTEST_POSITION_NOTIONAL
+        value: 500
+      - key: DEFAULT_BACKTEST_REACTION_DELAY_SECONDS
+        value: 5
+      - key: DEFAULT_BACKTEST_STOP_LOSS_PCT
+        value: 5
+      - key: DEFAULT_BACKTEST_SLIPPAGE_BPS
+        value: 5
+      - key: DEFAULT_BACKTEST_MAX_TRADES_PER_DAY
+        value: 5
+      - key: DEFAULT_BACKTEST_CLOSE_EXIT_MINUTES_BEFORE
+        value: 5
+      - key: BACKTEST_SYMBOL_BATCH_SIZE
+        value: 100
+      - key: DEFAULT_CONTROL_INCLUDE_RAW_TRADES
+        value: true
+      - key: DEFAULT_CONTROL_INCLUDE_RAW_QUOTES
+        value: true
+      - key: DEFAULT_CONTROL_DERIVE_ONE_SECOND
+        value: true
+      - key: DEFAULT_CONTROL_INCLUDE_NEWS
+        value: true
+      - key: DEFAULT_CONTROL_INCLUDE_AUCTIONS
+        value: true
+      - key: DEFAULT_CONTROL_INCLUDE_CORPORATE_ACTIONS
+        value: true
+      - key: DEFAULT_BUILD_ANALYSIS_EXPORT
+        value: true
+      - key: CONTROL_ASSET_BATCH_SIZE
+        value: 100
+      - key: DEFAULT_INCLUDE_RAW_TRADES
+        value: true
+      - key: DEFAULT_INCLUDE_RAW_QUOTES
+        value: true
+      - key: DEFAULT_INCLUDE_NEWS
+        value: true
+      - key: DEFAULT_INCLUDE_AUCTIONS
+        value: true
+      - key: DEFAULT_INCLUDE_CORPORATE_ACTIONS
+        value: true
+      - key: INCLUDE_OTC
+        value: false
+      - key: INCLUDE_PARTIAL_CURRENT_DAY
+        value: false
+      - key: SAVE_EVENT_BARS
+        value: true
+      - key: WORKER_POLL_SECONDS
+        value: 10
+      - key: DAILY_BATCH_SIZE
+        value: 100
+      - key: MINUTE_BATCH_SIZE
+        value: 20
+      - key: MAX_RETRIES
+        value: 7
+      - key: REQUEST_PAUSE_SECONDS
+        value: 0.20
+      - key: TEMP_ROOT
+        value: /tmp/alpaca-25pct-research
+      - key: STALE_JOB_MINUTES
+        value: 20

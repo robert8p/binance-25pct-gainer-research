@@ -3,97 +3,187 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Binance 25% C2/C4 External Validation</title>
-  <style>
-    :root { color-scheme:dark; --bg:#0b0f14; --panel:#141a22; --line:#27303d; --text:#f3f5f7; --muted:#9ba7b4; --accent:#f3ba2f; --good:#6bd59a; }
-    * { box-sizing:border-box; } body { margin:0; font-family:Inter,system-ui,sans-serif; background:var(--bg); color:var(--text); }
-    main { max-width:1280px; margin:auto; padding:32px 20px 60px; } h1 { margin:0 0 8px; font-size:32px; } h2 { margin-top:0; }
-    .muted { color:var(--muted); } .small { font-size:12px; } .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(320px,1fr)); gap:18px; margin:22px 0; }
-    .card { background:var(--panel); border:1px solid var(--line); border-radius:16px; padding:20px; margin-top:18px; }
-    label { display:block; font-size:13px; color:var(--muted); margin:12px 0 5px; } input,select { width:100%; padding:11px; border-radius:9px; border:1px solid var(--line); background:#0d1218; color:var(--text); }
-    button { margin-top:14px; background:var(--accent); color:#17130a; border:0; padding:11px 16px; border-radius:9px; font-weight:750; cursor:pointer; }
-    table { width:100%; border-collapse:collapse; font-size:13px; } th,td { text-align:left; border-bottom:1px solid var(--line); padding:10px 8px; vertical-align:top; } th { color:var(--muted); font-weight:600; }
-    a { color:#ffd86b; } code { color:#fbd77d; word-break:break-all; } .status { font-weight:700; } .warning { border-left:4px solid var(--accent); padding-left:12px; } .good { border-left:4px solid var(--good); padding-left:12px; } .scroll { overflow:auto; }
-  </style>
+  <title>Alpaca 25% Gainer Research Lab</title>
+  <link rel="stylesheet" href="/static/app.css">
 </head>
-<body><main>
-  <h1>Binance 25% Frozen-Rule External Validation</h1>
-  <p class="muted">v{{ version }} — evaluates ChatGPT-frozen C2 and C4 only.</p>
-  <p class="warning"><strong>No pattern discovery occurs in this app.</strong> It cannot change thresholds, invent filters, combine C2 and C4, or inspect the previous sealed-test package.</p>
-  <p class="good">Fixed historical cohort: <strong>1 January–25 May 2026 UTC</strong>. Database end-exclusive date: <code>{{ external_window_end_exclusive }}</code>.</p>
-  <p class="muted small">Frozen register SHA-256: <code>{{ candidate_register_sha256 }}</code></p>
+<body>
+  <main class="shell">
+    <header class="hero">
+      <div>
+        <p class="eyebrow">DISCOVERY + SELLABILITY + MATCHED CONTROLS + ACTIONABILITY + EXECUTION</p>
+        <h1>25% Gainer Research Lab</h1>
+        <p class="subtitle">Discover qualifying intraday gainers, validate frozen signals, and test whether they remain profitable under full-universe executable-entry and exit assumptions.</p>
+      </div>
+      <div class="status-pill"><span class="status-dot"></span> Alpaca SIP · Supabase Storage</div>
+    </header>
 
-  <section class="card">
-    <h2>Frozen candidates</h2>
-    <p><strong>C2:</strong> <code>close_vs_1440m_low_pct &gt;= 6.0</code> AND <code>quote_volume_60m_vs_prior_7d_same_time &gt;= 3.0</code></p>
-    <p><strong>C4:</strong> <code>max_runup_720m_pct &gt;= 10.0</code> AND <code>volatility_1d_to_7d_ratio &gt;= 0.30</code></p>
-    <p class="muted small">Each rule is assessed separately at exactly 480 minutes before the event/control anchor.</p>
-  </section>
-
-  <div class="grid">
-    <section class="card">
-      <h2>Step 1 — Scan fixed external period</h2>
-      <p class="muted">All settings are locked:</p>
-      <label>Historical period</label><input value="2026-01-01 to 2026-05-25 inclusive" disabled>
-      <label>Event definition</label><input value="Saleable 25% rise within 480 completed minutes" disabled>
-      <label>Quotes</label><input value="USDT, USDC, FDUSD" disabled>
-      <label>Exit notional / confirmation</label><input value="500 quote units / 300 seconds" disabled>
-      <form method="post" action="/external-validation-scan"><button>Queue fixed external-validation scan</button></form>
+    <section class="definition-card">
+      <strong>Leakage boundary</strong>
+      <span>Research inputs stop at the exact first threshold-reaching trade.</span>
+      <span class="definition-note">Post-crossing trades and quotes are isolated and used only to test sellability.</span>
     </section>
 
-    <section class="card">
-      <h2>Step 2 — Build matched controls</h2>
-      <p class="muted">Five same-symbol controls per event; ten days of history; 480-minute contamination protection before and after.</p>
-      <form method="post" action="/external-matched-controls">
-        <label>Completed fixed-period scan</label>
-        <select name="scan_id" required>
-          {% for scan in completed_external_scans %}<option value="{{ scan.id }}">{{ scan.created_at }} — {{ scan.events_found or 0 }} saleable events — {{ scan.id[:8] }}</option>{% endfor %}
-        </select>
-        <button>Queue external-validation controls</button>
-      </form>
+    <section class="grid two-col">
+      <article class="panel">
+        <div class="panel-head"><div><p class="eyebrow">STEP 1</p><h2>Queue a discovery scan</h2></div></div>
+        <form id="scan-form" class="form-grid">
+          <label>Calendar lookback<div class="input-wrap"><input id="lookback" type="number" min="5" max="365" value="{{ default_lookback }}"><span>days</span></div></label>
+          <label>Gain threshold<div class="input-wrap"><input id="threshold" type="number" min="25" max="25" value="25" readonly><span>%</span></div></label>
+          <label class="wide">Universe<select id="universe"><option value="current_tradable" {% if default_universe == 'current_tradable' %}selected{% endif %}>Current active + tradable Alpaca equities</option><option value="all_recent_alpaca_assets">All Alpaca equity assets with recent bars</option></select></label>
+          <label>Data feed<select id="feed"><option value="sip" selected>SIP — all US exchanges</option><option value="iex">IEX — testing only</option></select></label>
+          <label class="check-row"><input id="save-bars" type="checkbox" checked>Save qualifying-day one-minute bars</label>
+          <button type="submit" class="primary">Queue scan</button>
+        </form>
+        <p id="form-message" class="message"></p>
+      </article>
+
+      <article class="panel">
+        <div class="panel-head"><div><p class="eyebrow">LATEST DISCOVERY RUN</p><h2>Scan status</h2></div><button id="refresh-scans" class="ghost">Refresh</button></div>
+        <div id="latest-scan" class="empty-state">No scan loaded yet.</div>
+      </article>
     </section>
 
-    <section class="card">
-      <h2>Step 3 — Evaluate frozen C2/C4</h2>
-      <p class="muted">Computes only the neutral 480-minute snapshot required to reproduce the two frozen rules.</p>
-      <form method="post" action="/external-validation">
-        <label>Completed external matched-control job</label>
-        <select name="matched_control_job_id" required>
-          {% for job in completed_external_matched_jobs %}<option value="{{ job.id }}">{{ job.created_at }} — {{ job.controls_created or 0 }} controls — {{ job.id[:8] }}</option>{% endfor %}
-        </select>
-        <button>Run frozen-rule evaluation</button>
-      </form>
+    <section class="panel research-panel">
+      <div class="panel-head"><div><p class="eyebrow">STEP 2</p><h2>Build sellability-filtered pre-event dataset</h2></div><button id="refresh-research" class="ghost">Refresh</button></div>
+      <div class="grid two-col">
+        <form id="research-form" class="form-grid">
+          <label class="wide">Completed source scan<select id="source-scan"></select></label>
+          <label>Prior trading sessions<div class="input-wrap"><input id="prior-sessions" type="number" min="1" max="30" value="{{ default_prior_sessions }}"><span>sessions</span></div></label>
+          <label>Minimum displayed exit<div class="input-wrap"><input id="sellable-notional" type="number" min="1" value="{{ default_sellability_notional }}"><span>USD</span></div></label>
+          <label>Confirmation window<div class="input-wrap"><input id="sellable-window" type="number" min="30" max="1800" value="{{ default_sellability_window }}"><span>seconds</span></div></label>
+          <label>Maximum events<div class="input-wrap"><input id="max-events" type="number" min="0" value="0"><span>0 = all</span></div></label>
+          <label class="check-row"><input id="require-trade" type="checkbox" checked>Require a subsequent trade at/above threshold after the displayed bid</label>
+          <label class="check-row"><input id="raw-trades" type="checkbox" checked>Download every available trade</label>
+          <label class="check-row"><input id="raw-quotes" type="checkbox" checked>Download every available NBBO quote</label>
+          <label class="check-row"><input id="derive-seconds" type="checkbox" checked>Create one-second derived summaries</label>
+          <label class="check-row"><input id="include-news" type="checkbox" checked>Include historical news with content</label>
+          <label class="check-row"><input id="include-auctions" type="checkbox" checked>Include opening/closing auction data</label>
+          <label class="check-row"><input id="include-ca" type="checkbox" checked>Include corporate actions</label>
+          <button type="submit" class="primary">Queue research package</button>
+          <p id="research-message" class="message wide"></p>
+        </form>
+        <div id="latest-research" class="empty-state">No research package queued yet.</div>
+      </div>
+      <div class="research-download-grid">
+        <div id="research-events" class="event-browser"></div>
+        <div id="research-files" class="file-list"></div>
+      </div>
     </section>
-  </div>
 
-  <section class="card"><h2>Worker</h2>{% if heartbeat %}<p>Last heartbeat: <code>{{ heartbeat.heartbeat_at }}</code></p>{% else %}<p class="muted">No V1.2 worker heartbeat yet.</p>{% endif %}</section>
+    <section class="panel research-panel">
+      <div class="panel-head"><div><p class="eyebrow">STEP 3</p><h2>Build matched non-event controls</h2></div><button id="refresh-controls" class="ghost">Refresh</button></div>
+      <div class="definition-card control-definition">
+        <strong>Control definition</strong>
+        <span>Same trading date and strictly balanced pre-event characteristics, but the stock's event-day high remained below +25%.</span>
+        <span class="definition-note">V3.0.2 ranks all candidates globally, accepts only excellent/good controls, and may return fewer than five rather than force a weak match.</span>
+      </div>
+      <div class="grid two-col">
+        <form id="control-form" class="form-grid">
+          <label class="wide">Completed sellability research job<select id="source-research"></select></label>
+          <label>Controls per event<div class="input-wrap"><input id="controls-per-event" type="number" min="1" max="20" value="{{ default_controls_per_event }}"><span>controls</span></div></label>
+          <label>Matching history<div class="input-wrap"><input id="control-feature-sessions" type="number" min="5" max="60" value="{{ default_control_feature_sessions }}"><span>sessions</span></div></label>
+          <label>Daily-history buffer<div class="input-wrap"><input id="control-history-days" type="number" min="45" max="730" value="{{ default_control_history_days }}"><span>calendar days</span></div></label>
+          <label>Maximum symbol reuse<div class="input-wrap"><input id="max-symbol-uses" type="number" min="1" max="500" value="{{ default_max_control_symbol_uses }}"><span>times</span></div></label>
+          <label>Detailed prior history<div class="input-wrap"><input id="control-prior-sessions" type="number" min="1" max="30" value="{{ default_prior_sessions }}"><span>sessions</span></div></label>
+          <label>Maximum positive events<div class="input-wrap"><input id="control-max-events" type="number" min="0" value="5"><span>0 = all</span></div></label>
+          <label>Data feed<select id="control-feed"><option value="sip" selected>SIP — all US exchanges</option><option value="iex">IEX — testing only</option></select></label>
+          <label class="check-row"><input type="checkbox" checked disabled>Rank all same-date candidates globally</label>
+          <label class="check-row"><input id="require-ca-match" type="checkbox" checked>Require matching corporate-action status</label>
+          <label class="check-row"><input type="checkbox" checked disabled>Reject all weak controls before download</label>
+          <label class="check-row"><input id="control-raw-trades" type="checkbox" checked>Download every available control trade</label>
+          <label class="check-row"><input id="control-raw-quotes" type="checkbox" checked>Download every available control NBBO quote</label>
+          <label class="check-row"><input id="control-seconds" type="checkbox" checked>Create one-second summaries</label>
+          <label class="check-row"><input id="control-news" type="checkbox" checked>Include historical news</label>
+          <label class="check-row"><input id="control-auctions" type="checkbox" checked>Include auctions</label>
+          <label class="check-row"><input id="control-ca" type="checkbox" checked>Include corporate actions</label>
+          <button type="submit" class="primary">Queue matched controls</button>
+          <p id="control-message" class="message wide"></p>
+        </form>
+        <div id="latest-control" class="empty-state">No matched-control job queued yet.</div>
+      </div>
+      <div id="control-files" class="file-list"></div>
+    </section>
 
-  <section class="card">
-    <h2>Fixed-period scans</h2>
-    <div class="scroll"><table><thead><tr><th>Created</th><th>Status</th><th>Progress</th><th>Candidates</th><th>Saleable</th><th>Failures</th></tr></thead><tbody>
-      {% for scan in scans %}{% if scan.research_purpose == "external_validation_c2_c4" %}<tr><td>{{ scan.created_at }}<br><span class="muted">{{ scan.id[:8] }}</span></td><td class="status">{{ scan.status }}</td><td>{{ scan.symbols_processed or 0 }}/{{ scan.symbols_total or 0 }}</td><td>{{ scan.candidates_found or 0 }}</td><td>{{ scan.events_found or 0 }}</td><td>{{ scan.failures or 0 }}</td></tr>{% endif %}{% endfor %}
-    </tbody></table></div>
-  </section>
 
-  <section class="card">
-    <h2>External matched-control jobs</h2>
-    <div class="scroll"><table><thead><tr><th>Created</th><th>Status</th><th>Events</th><th>Controls</th><th>Failures</th></tr></thead><tbody>
-      {% for job in matched_jobs %}{% if job.research_purpose == "external_validation_c2_c4" %}<tr><td>{{ job.created_at }}<br><span class="muted">{{ job.id[:8] }}</span></td><td class="status">{{ job.status }}</td><td>{{ job.events_processed or 0 }}/{{ job.events_total or 0 }}</td><td>{{ job.controls_created or 0 }}/{{ job.controls_target or 0 }}</td><td>{{ job.failures or 0 }}</td></tr>{% endif %}{% endfor %}
-    </tbody></table></div>
-  </section>
+    <section class="panel research-panel">
+      <div class="panel-head"><div><p class="eyebrow">STEP 4</p><h2>Classify post-open entry feasibility and freeze analysis splits</h2></div><button id="refresh-entry" class="ghost">Refresh</button></div>
+      <div class="definition-card control-definition">
+        <strong>Primary actionable definition</strong>
+        <span>A confirmed regular-session ask below the +25% threshold, with the configured displayed notional and continuous opportunity duration, followed by the already-confirmed sellable threshold event.</span>
+        <span class="definition-note">The exporter removes controls for non-actionable positives and creates separate discovery, validation and sealed-test files at 14:00, 17:00 and 19:00 London decision cutoffs.</span>
+      </div>
+      <div class="grid two-col">
+        <form id="entry-form" class="form-grid">
+          <label class="wide">Completed matched-control job<select id="source-control"></select></label>
+          <label>Minimum entry size<select id="entry-notional">
+            <option value="100" {% if default_entry_notional == 100 %}selected{% endif %}>US$100</option>
+            <option value="500" {% if default_entry_notional == 500 %}selected{% endif %}>US$500</option>
+            <option value="1000" {% if default_entry_notional == 1000 %}selected{% endif %}>US$1,000</option>
+            <option value="5000" {% if default_entry_notional == 5000 %}selected{% endif %}>US$5,000</option>
+          </select></label>
+          <label>Reaction allowance<div class="input-wrap"><input id="entry-reaction-delay" type="number" min="0" max="300" value="{{ default_entry_reaction_delay }}"><span>seconds</span></div></label>
+          <label>Continuous opportunity<div class="input-wrap"><input id="entry-opportunity-seconds" type="number" min="0" max="1800" value="{{ default_entry_minimum_opportunity }}"><span>seconds</span></div></label>
+          <label>Minimum gross edge<div class="input-wrap"><input id="entry-min-edge" type="number" min="0" max="100" step="0.1" value="{{ default_entry_minimum_gross_edge }}"><span>% to threshold</span></div></label>
+          <label>Maximum positive events<div class="input-wrap"><input id="entry-max-events" type="number" min="0" value="5"><span>0 = all</span></div></label>
+          <label class="check-row"><input id="entry-require-trade" type="checkbox" checked>Require a later trade at/above the displayed ask while it remained active</label>
+          <label class="check-row"><input type="checkbox" checked disabled>Build 14:00, 17:00 and 19:00 London snapshots</label>
+          <label class="check-row"><input type="checkbox" checked disabled>Keep sealed-test predictor features in a separate archive</label>
+          <button type="submit" class="primary">Queue entry-feasibility export</button>
+          <p id="entry-message" class="message wide"></p>
+        </form>
+        <div id="latest-entry" class="empty-state">No entry-feasibility job queued yet.</div>
+      </div>
+      <div id="entry-files" class="file-list"></div>
+    </section>
 
-  <section class="card">
-    <h2>Frozen-rule evaluation jobs</h2>
-    <div class="scroll"><table><thead><tr><th>Created</th><th>Status</th><th>Samples</th><th>Features</th><th>Usable groups</th><th>Decision</th><th>Failures</th></tr></thead><tbody>
-      {% for job in external_validation_jobs %}<tr><td>{{ job.created_at }}<br><span class="muted">{{ job.id[:8] }}</span></td><td class="status">{{ job.status }}</td><td>{{ job.samples_processed or 0 }}/{{ job.samples_total or 0 }}</td><td>{{ job.feature_rows or 0 }}</td><td>{{ job.usable_groups or 0 }}</td><td>{{ job.overall_decision or "—" }}</td><td>{{ job.failures or 0 }}</td></tr>{% endfor %}
-    </tbody></table></div>
-  </section>
 
-  <section class="card">
-    <h2>External-validation downloads</h2>
-    <p class="muted">Download the index ZIP and every numbered feature ZIP, then upload them together to ChatGPT for independent reproduction and interpretation.</p>
-    <div class="scroll"><table><thead><tr><th>Created</th><th>Role</th><th>File</th><th>Size</th><th>Download</th></tr></thead><tbody>
-      {% for file in external_validation_files %}<tr><td>{{ file.created_at }}</td><td>{{ file.role }}</td><td>{{ file.filename }}</td><td>{{ file.size_bytes }}</td><td><a href="/external-validation-files/{{ file.id }}">temporary link</a></td></tr>{% endfor %}
-    </tbody></table></div>
-  </section>
-</main></body></html>
+
+    <section class="panel research-panel">
+      <div class="panel-head"><div><p class="eyebrow">STEP 5</p><h2>Run the frozen full-universe profitability backtest</h2></div><button id="refresh-backtest" class="ghost">Refresh</button></div>
+      <div class="definition-card control-definition">
+        <strong>Step 5 locked pending 25%-specific signal validation</strong>
+        <span>The source package’s frozen signals were discovered on +50% events. They are retained only as reference code and must not be treated as validated predictors of +25% events.</span>
+        <span class="definition-note">Complete Steps 1–4, analyse the discovery and validation splits, and open the sealed test only after the scoring rule is fixed. Then replace the reference rule set and explicitly enable Step 5.</span>
+      </div>
+      <div class="grid two-col">
+        <form id="backtest-form" class="form-grid">
+          <label class="wide">Completed entry-feasibility job<select id="source-entry"></select></label>
+          <label class="wide">Historical window<select id="backtest-window"><option value="source_study" selected>Original 90-day study window</option><option value="prior_90_days">Untouched preceding 90 calendar days</option></select></label>
+          <label>Position size<select id="backtest-notional" disabled><option value="100">US$100</option><option value="500" selected>US$500</option><option value="1000">US$1,000</option><option value="5000">US$5,000</option></select></label>
+          <label>Reaction delay<div class="input-wrap"><input id="backtest-reaction" disabled type="number" min="0" max="60" value="{{ default_backtest_reaction_delay }}"><span>seconds</span></div></label>
+          <label>Stop loss<div class="input-wrap"><input id="backtest-stop" disabled type="number" min="0.5" max="25" step="0.1" value="{{ default_backtest_stop_loss }}"><span>%</span></div></label>
+          <label>Execution slippage<div class="input-wrap"><input id="backtest-slippage" disabled type="number" min="0" max="100" step="0.1" value="{{ default_backtest_slippage }}"><span>bps each side</span></div></label>
+          <label>Maximum trades/day<div class="input-wrap"><input id="backtest-max-trades" disabled type="number" min="1" max="5" value="{{ default_backtest_max_trades }}"><span>per strategy</span></div></label>
+          <label>Close liquidation<div class="input-wrap"><input id="backtest-close-minutes" disabled type="number" min="0" max="60" value="{{ default_backtest_close_minutes }}"><span>minutes before close</span></div></label>
+          <label>Maximum market dates<div class="input-wrap"><input id="backtest-max-dates" type="number" min="0" value="3"><span>0 = full window</span></div></label>
+          <label>Data feed<select id="backtest-feed" disabled><option value="sip" selected>SIP — all US exchanges</option></select></label>
+          <label class="check-row"><input id="backtest-preopen" type="checkbox" checked disabled>Test frozen 14:00 London pre-open ranking/threshold</label>
+          <label class="check-row"><input id="backtest-midday" type="checkbox" checked disabled>Test frozen 17:00 London return threshold</label>
+          <label class="check-row"><input type="checkbox" checked disabled>No signal or exit-rule retuning</label>
+          <label class="check-row"><input type="checkbox" checked disabled>Store every trigger, selected trade and failed fill</label>
+          <button type="submit" class="primary" {% if not backtest_enabled %}disabled{% endif %}>{% if backtest_enabled %}Queue execution backtest{% else %}Locked pending 25% frozen rules{% endif %}</button>
+          <p id="backtest-message" class="message wide"></p>
+        </form>
+        <div id="latest-backtest" class="empty-state">No execution backtest queued yet.</div>
+      </div>
+      <div id="backtest-files" class="file-list"></div>
+    </section>
+
+    <section class="panel results-panel">
+      <div class="panel-head result-head">
+        <div><p class="eyebrow">QUALIFYING EVENTS</p><h2>Discovery results</h2></div>
+        <div class="result-actions"><input id="search" class="search" placeholder="Search symbol or company"><button id="export" class="ghost" disabled>Export complete CSV</button></div>
+      </div>
+      <div class="summary-strip"><div><span id="result-count">0</span><small>events shown</small></div><div><span id="symbol-count">0</span><small>stocks</small></div><div><span id="median-gain">—</span><small>median peak gain</small></div><div><span id="median-postopen">—</span><small>median open-to-peak</small></div></div>
+      <div class="table-wrap"><table><thead><tr><th>Date</th><th>Symbol</th><th>Company</th><th>Peak gain</th><th>Opening gap</th><th>Open → peak</th><th>1-min entry → peak</th><th>Crossed</th><th>Volume</th><th>Flags</th></tr></thead><tbody id="results-body"><tr><td colspan="10" class="empty-cell">Run or select a completed scan.</td></tr></tbody></table></div>
+    </section>
+
+    <section class="panel"><div class="panel-head"><div><p class="eyebrow">DISCOVERY HISTORY</p><h2>Scans</h2></div></div><div id="scan-list" class="scan-list"></div></section>
+    <section class="panel"><div class="panel-head"><div><p class="eyebrow">RESEARCH HISTORY</p><h2>Research packages</h2></div></div><div id="research-list" class="scan-list"></div></section>
+    <section class="panel"><div class="panel-head"><div><p class="eyebrow">MATCHED-CONTROL HISTORY</p><h2>Control datasets</h2></div></div><div id="control-list" class="scan-list"></div></section>
+    <section class="panel"><div class="panel-head"><div><p class="eyebrow">ENTRY-FEASIBILITY HISTORY</p><h2>Actionable exports</h2></div></div><div id="entry-list" class="scan-list"></div></section>
+    <section class="panel"><div class="panel-head"><div><p class="eyebrow">EXECUTION-BACKTEST HISTORY</p><h2>Profitability backtests</h2></div></div><div id="backtest-list" class="scan-list"></div></section>
+  </main>
+  <script src="/static/app.js"></script>
+</body>
+</html>
