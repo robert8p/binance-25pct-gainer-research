@@ -23,6 +23,7 @@ from .matched_controls import (
     safe_pct,
 )
 from .supabase import SupabaseClient
+from .package_utils import build_grouped_zip_parts
 
 # Fixed measurement grids are data-design choices, not candidate signal thresholds.
 BASELINE_SNAPSHOT_OFFSETS = (14400, 10080, 7200, 4320, 2880, 1440, 720, 480, 360, 180, 60, 0)
@@ -555,54 +556,83 @@ class BaselineContextBuilder:
                 uploaded.append(record)
                 return storage_path
 
-            def write_package(folder: Path, sample_part: pd.DataFrame, feature_part: pd.DataFrame,
-                              pre_cross_part: pd.DataFrame, quality_part: pd.DataFrame,
-                              audit_part: pd.DataFrame, readme: str) -> None:
-                folder.mkdir(parents=True, exist_ok=True)
-                sample_part.to_csv(folder / "sample_anchors.csv", index=False)
-                feature_part.to_csv(folder / "baseline_context_features.csv", index=False)
-                feature_part.to_parquet(folder / "baseline_context_features.parquet", index=False, compression="zstd")
-                pre_cross_part.to_csv(folder / "pre_cross_snapshot_features.csv", index=False)
-                pre_cross_part.to_parquet(folder / "pre_cross_snapshot_features.parquet", index=False, compression="zstd")
-                quality_part.to_csv(folder / "data_quality.csv", index=False)
-                audit_part.to_csv(folder / "control_contamination_audit.csv", index=False)
-                (folder / "design.json").write_text(json.dumps(design, indent=2, default=_json_ready), encoding="utf-8")
-                write_analysis_contract(folder, "baseline_context_package")
-                (folder / "README.txt").write_text(readme, encoding="utf-8")
+            def group_ids_for(samples_part: pd.DataFrame) -> list[str]:
+                if samples_part.empty or "match_group_id" not in samples_part:
+                    return []
+                return samples_part["match_group_id"].dropna().astype(str).drop_duplicates().tolist()
 
-            package_paths: dict[str, str] = {}
+            def build_parts(split_name: str, samples_part: pd.DataFrame,
+                            feature_part: pd.DataFrame, pre_cross_part: pd.DataFrame,
+                            quality_part: pd.DataFrame, audit_part: pd.DataFrame,
+                            readme: str) -> list[Path]:
+                def writer(folder: Path, selected_groups: list[str]) -> None:
+                    selected = set(selected_groups)
+                    if "__EMPTY_PACKAGE__" in selected:
+                        sample_chunk = samples_part.iloc[0:0].copy()
+                    else:
+                        sample_chunk = samples_part[
+                            samples_part["match_group_id"].astype(str).isin(selected)
+                        ].copy()
+                    sample_ids = set(sample_chunk["sample_id"].astype(str)) if "sample_id" in sample_chunk else set()
+                    def by_sample(frame: pd.DataFrame) -> pd.DataFrame:
+                        if "sample_id" not in frame:
+                            return frame.iloc[0:0].copy()
+                        return frame[frame["sample_id"].astype(str).isin(sample_ids)].copy()
+
+                    folder.mkdir(parents=True, exist_ok=True)
+                    sample_chunk.to_csv(folder / "sample_anchors.csv", index=False)
+                    by_sample(feature_part).to_parquet(
+                        folder / "baseline_context_features.parquet", index=False, compression="zstd"
+                    )
+                    by_sample(pre_cross_part).to_parquet(
+                        folder / "pre_cross_snapshot_features.parquet", index=False, compression="zstd"
+                    )
+                    by_sample(quality_part).to_csv(folder / "data_quality.csv", index=False)
+                    by_sample(audit_part).to_csv(folder / "control_contamination_audit.csv", index=False)
+                    (folder / "design.json").write_text(
+                        json.dumps(design, indent=2, default=_json_ready), encoding="utf-8"
+                    )
+                    write_analysis_contract(folder, f"baseline_context_{split_name}")
+                    (folder / "README.txt").write_text(
+                        readme
+                        + "\nThe canonical feature matrices are Parquet. ChatGPT should load every part for this split before analysing it.\n",
+                        encoding="utf-8",
+                    )
+
+                return build_grouped_zip_parts(
+                    work_dir=work,
+                    base_name=f"baseline_context_{split_name}",
+                    group_ids=group_ids_for(samples_part),
+                    writer=writer,
+                )
+
+            package_paths: dict[str, list[str]] = {}
             if research_mode == "exploratory_reuse":
-                folder = work / "exploratory"
-                write_package(
-                    folder,
-                    sample_df,
-                    feature_df,
-                    pre_cross_df,
-                    quality_df,
-                    audit_df,
+                paths = build_parts(
+                    "exploratory", sample_df, feature_df, pre_cross_df, quality_df, audit_df,
                     "EXPLORATORY ONLY. Split-sealing is not enforced in this package. Use it for ChatGPT-led discovery or implementation audit, not final confirmation.\n",
                 )
-                path = work / "baseline_context_exploratory.zip"
-                _zip_directory(folder, path)
-                package_paths["exploratory"] = upload(path, "baseline_context_exploratory")
+                package_paths["exploratory"] = [
+                    upload(path, "baseline_context_exploratory") for path in paths
+                ]
             else:
                 for split in SPLITS:
-                    folder = work / split
-                    write_package(
-                        folder,
+                    paths = build_parts(
+                        split,
                         sample_df[sample_df["split"] == split].copy(),
                         feature_df[feature_df["split"] == split].copy(),
                         pre_cross_df[pre_cross_df["split"] == split].copy(),
                         quality_df[quality_df["split"] == split].copy(),
                         audit_df[audit_df["split"] == split].copy(),
-                        f"Baseline-aligned {split} package.\n" + (
+                        f"Baseline-aligned {split} package.\n"
+                        + (
                             "DO NOT OPEN UNTIL THE COMPLETE CHATGPT-DISCOVERED RULE IS FROZEN.\n"
                             if split == "sealed_test" else ""
                         ),
                     )
-                    path = work / f"baseline_context_{split}.zip"
-                    _zip_directory(folder, path)
-                    package_paths[split] = upload(path, f"baseline_context_{split}", split)
+                    package_paths[split] = [
+                        upload(path, f"baseline_context_{split}", split) for path in paths
+                    ]
 
             index = work / "index"
             index.mkdir(parents=True, exist_ok=True)

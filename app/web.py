@@ -12,16 +12,21 @@ from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 
 from .config import Settings
+from .frozen_candidates import (
+    EXTERNAL_WINDOW_END_EXCLUSIVE,
+    EXTERNAL_WINDOW_START,
+    register_sha256,
+)
 from .supabase import SupabaseClient
 
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
 EVENT_DEFINITION_VERSION = "v1_25pct_rolling_8h"
 FIXED_THRESHOLD_PCT = 25.0
 FIXED_WINDOW_MINUTES = 480
 
 settings = Settings.from_env()
 db = SupabaseClient(settings.supabase_url, settings.supabase_service_role_key, settings.storage_bucket)
-app = FastAPI(title="Binance 8-Hour 25% Gainer Research", version=APP_VERSION)
+app = FastAPI(title="Binance 25% Frozen C2/C4 External Validation", version=APP_VERSION)
 templates = Jinja2Templates(directory="app/templates")
 
 
@@ -47,6 +52,15 @@ def _completed_25pct_scans(scans: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ]
 
 
+def _completed_external_scans(scans: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        row for row in _completed_25pct_scans(scans)
+        if row.get("research_purpose") == "external_validation_c2_c4"
+        and str(row.get("window_start_date")) == EXTERNAL_WINDOW_START
+        and str(row.get("window_end_date_exclusive")) == EXTERNAL_WINDOW_END_EXCLUSIVE
+    ]
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {
@@ -54,6 +68,8 @@ def health() -> dict[str, str]:
         "version": APP_VERSION,
         "target": "25pct_within_8h",
         "event_definition_version": EVENT_DEFINITION_VERSION,
+        "purpose": "frozen_c2_c4_external_validation",
+        "candidate_register_sha256": register_sha256(),
     }
 
 
@@ -65,14 +81,23 @@ def dashboard(request: Request) -> HTMLResponse:
     matched_jobs = db.select("binance_matched_control_jobs", order="created_at.desc", limit=25)
     context_jobs = db.select("binance_context_jobs", order="created_at.desc", limit=25)
     baseline_jobs = db.select("binance_baseline_context_jobs", order="created_at.desc", limit=25)
+    external_jobs = db.select("binance_external_validation_jobs", order="created_at.desc", limit=25)
     heartbeat = db.select("binance_worker_heartbeats", filters={"worker_name": "eq.main"}, limit=1)
 
     completed_scans = _completed_25pct_scans(scans)
+    completed_external_scans = _completed_external_scans(scans)
     completed_scan_ids = {str(row["id"]) for row in completed_scans}
     completed_matched_jobs = [
         row for row in matched_jobs
         if row.get("status") in {"completed", "completed_with_warnings"}
         and str(row.get("scan_id")) in completed_scan_ids
+    ]
+    external_scan_ids = {str(row["id"]) for row in completed_external_scans}
+    completed_external_matched_jobs = [
+        row for row in matched_jobs
+        if row.get("status") in {"completed", "completed_with_warnings"}
+        and row.get("research_purpose") == "external_validation_c2_c4"
+        and str(row.get("scan_id")) in external_scan_ids
     ]
 
     return templates.TemplateResponse(
@@ -87,11 +112,18 @@ def dashboard(request: Request) -> HTMLResponse:
             "baseline_context_jobs": baseline_jobs,
             "completed_scans": completed_scans,
             "completed_matched_jobs": completed_matched_jobs,
+            "completed_external_scans": completed_external_scans,
+            "completed_external_matched_jobs": completed_external_matched_jobs,
+            "external_validation_jobs": external_jobs,
+            "external_window_start": EXTERNAL_WINDOW_START,
+            "external_window_end_exclusive": EXTERNAL_WINDOW_END_EXCLUSIVE,
+            "candidate_register_sha256": register_sha256(),
             "heartbeat": heartbeat[0] if heartbeat else None,
             "files": db.select("binance_research_files", order="created_at.desc", limit=100),
             "matched_files": db.select("binance_matched_control_files", order="created_at.desc", limit=100),
             "context_files": db.select("binance_context_files", order="created_at.desc", limit=100),
             "baseline_context_files": db.select("binance_baseline_context_files", order="created_at.desc", limit=100),
+            "external_validation_files": db.select("binance_external_validation_files", order="created_at.desc", limit=100),
         },
     )
 
@@ -107,6 +139,7 @@ def create_scan(
     window_end_date_exclusive: str = Form(""),
 ) -> RedirectResponse:
     _auth(request)
+    raise HTTPException(410, "This V1.2 release accepts only the locked external-validation workflow")
     if not 1 <= lookback_days <= 180:
         raise HTTPException(400, "lookback_days must be between 1 and 180")
     if min_exit_notional < 0:
@@ -139,6 +172,7 @@ def create_scan(
         {
             "id": str(uuid.uuid4()),
             "status": "queued",
+            "research_purpose": "chatgpt_discovery",
             "event_definition_version": EVENT_DEFINITION_VERSION,
             "lookback_days": lookback_days,
             "threshold_pct": FIXED_THRESHOLD_PCT,
@@ -148,6 +182,124 @@ def create_scan(
             "confirmation_window_seconds": confirmation_window_seconds,
             "window_start_date": start_value,
             "window_end_date_exclusive": end_value,
+        },
+    )
+    return RedirectResponse("/", status_code=303)
+
+
+@app.post("/external-validation-scan")
+def create_external_validation_scan(request: Request) -> RedirectResponse:
+    _auth(request)
+    existing = db.select(
+        "binance_scan_jobs",
+        filters={
+            "research_purpose": "eq.external_validation_c2_c4",
+            "window_start_date": f"eq.{EXTERNAL_WINDOW_START}",
+            "window_end_date_exclusive": f"eq.{EXTERNAL_WINDOW_END_EXCLUSIVE}",
+            "status": "in.(queued,running,completed,completed_with_warnings)",
+        },
+        order="created_at.desc",
+        limit=1,
+    )
+    if existing:
+        raise HTTPException(409, "An active or completed fixed-period external-validation scan already exists")
+    start_day = date.fromisoformat(EXTERNAL_WINDOW_START)
+    end_day = date.fromisoformat(EXTERNAL_WINDOW_END_EXCLUSIVE)
+    db.insert(
+        "binance_scan_jobs",
+        {
+            "id": str(uuid.uuid4()),
+            "status": "queued",
+            "research_purpose": "external_validation_c2_c4",
+            "event_definition_version": EVENT_DEFINITION_VERSION,
+            "lookback_days": (end_day - start_day).days,
+            "threshold_pct": FIXED_THRESHOLD_PCT,
+            "window_minutes": FIXED_WINDOW_MINUTES,
+            "quote_assets": ["USDT", "USDC", "FDUSD"],
+            "min_exit_notional": 500,
+            "confirmation_window_seconds": 300,
+            "window_start_date": EXTERNAL_WINDOW_START,
+            "window_end_date_exclusive": EXTERNAL_WINDOW_END_EXCLUSIVE,
+        },
+    )
+    return RedirectResponse("/", status_code=303)
+
+
+@app.post("/external-matched-controls")
+def create_external_matched_controls(
+    request: Request,
+    scan_id: str = Form(...),
+) -> RedirectResponse:
+    _auth(request)
+    scans = db.select("binance_scan_jobs", filters={"id": f"eq.{scan_id}"}, limit=1)
+    if not scans or not _completed_external_scans(scans):
+        raise HTTPException(400, "Select the completed fixed-period external-validation scan")
+    existing = db.select(
+        "binance_matched_control_jobs",
+        filters={
+            "scan_id": f"eq.{scan_id}",
+            "research_purpose": "eq.external_validation_c2_c4",
+            "status": "in.(queued,running,completed,completed_with_warnings)",
+        },
+        order="created_at.desc",
+        limit=1,
+    )
+    if existing:
+        raise HTTPException(409, "An active or completed external-validation matched-control job already exists")
+    db.insert(
+        "binance_matched_control_jobs",
+        {
+            "id": str(uuid.uuid4()),
+            "scan_id": scan_id,
+            "status": "queued",
+            "research_purpose": "external_validation_c2_c4",
+            "controls_per_event": 5,
+            "prior_days": 10,
+            "horizons_minutes": [480],
+            "contamination_before_minutes": 480,
+            "contamination_after_minutes": 480,
+            "min_entry_notional": 500,
+            "discovery_pct": 70,
+            "validation_pct": 15,
+        },
+    )
+    return RedirectResponse("/", status_code=303)
+
+
+@app.post("/external-validation")
+def create_external_validation(
+    request: Request,
+    matched_control_job_id: str = Form(...),
+) -> RedirectResponse:
+    _auth(request)
+    matched = db.select(
+        "binance_matched_control_jobs",
+        filters={"id": f"eq.{matched_control_job_id}"},
+        limit=1,
+    )
+    if not matched or matched[0].get("status") not in {"completed", "completed_with_warnings"}:
+        raise HTTPException(400, "Select a completed external-validation matched-control job")
+    if matched[0].get("research_purpose") != "external_validation_c2_c4":
+        raise HTTPException(400, "The selected job is not the V1.2 external-validation cohort")
+    existing = db.select(
+        "binance_external_validation_jobs",
+        filters={
+            "matched_control_job_id": f"eq.{matched_control_job_id}",
+            "status": "in.(queued,running,completed,completed_with_warnings)",
+        },
+        order="created_at.desc",
+        limit=1,
+    )
+    if existing:
+        raise HTTPException(409, "An active or completed frozen-rule evaluation already exists")
+    db.insert(
+        "binance_external_validation_jobs",
+        {
+            "id": str(uuid.uuid4()),
+            "matched_control_job_id": matched_control_job_id,
+            "status": "queued",
+            "candidate_register_sha256": register_sha256(),
+            "decision_horizon_minutes": 480,
         },
     )
     return RedirectResponse("/", status_code=303)
@@ -164,6 +316,7 @@ def create_research(
     include_raw_trades: bool = Form(False),
 ) -> RedirectResponse:
     _auth(request)
+    raise HTTPException(410, "This V1.2 release accepts only the locked external-validation workflow")
     if not 1 <= prior_days <= 30:
         raise HTTPException(400, "prior_days must be between 1 and 30")
     db.insert(
@@ -192,6 +345,7 @@ def create_matched_controls(
     min_entry_notional: float = Form(500),
 ) -> RedirectResponse:
     _auth(request)
+    raise HTTPException(410, "This V1.2 release accepts only the locked external-validation workflow")
     if not 1 <= controls_per_event <= 10:
         raise HTTPException(400, "controls_per_event must be between 1 and 10")
     if not 1 <= prior_days <= 30:
@@ -217,6 +371,7 @@ def create_matched_controls(
             "id": str(uuid.uuid4()),
             "scan_id": scan_id,
             "status": "queued",
+            "research_purpose": "chatgpt_discovery",
             "controls_per_event": controls_per_event,
             "prior_days": prior_days,
             "horizons_minutes": horizons,
@@ -239,6 +394,7 @@ def create_ten_day_context(
     min_entry_notional: float = Form(500),
 ) -> RedirectResponse:
     _auth(request)
+    raise HTTPException(410, "This V1.2 release accepts only the locked external-validation workflow")
     if research_mode not in {"exploratory_reuse", "fresh_staged"}:
         raise HTTPException(400, "Invalid research mode")
     try:
@@ -273,6 +429,7 @@ def create_baseline_context(
     min_entry_notional: float = Form(500),
 ) -> RedirectResponse:
     _auth(request)
+    raise HTTPException(410, "This V1.2 release accepts only the locked external-validation workflow")
     if research_mode not in {"exploratory_reuse", "fresh_staged"}:
         raise HTTPException(400, "Invalid research mode")
     if min_entry_notional < 0:
@@ -383,6 +540,11 @@ def download_baseline_context_file(request: Request, file_id: str) -> RedirectRe
     return _download(request, "binance_baseline_context_files", file_id, "Baseline-context file not found")
 
 
+@app.get("/external-validation-files/{file_id}")
+def download_external_validation_file(request: Request, file_id: str) -> RedirectResponse:
+    return _download(request, "binance_external_validation_files", file_id, "External-validation file not found")
+
+
 @app.get("/api/status")
 def api_status(request: Request) -> dict[str, Any]:
     _auth(request)
@@ -396,5 +558,7 @@ def api_status(request: Request) -> dict[str, Any]:
         "matched_control_jobs": db.select("binance_matched_control_jobs", order="created_at.desc", limit=20),
         "context_jobs": db.select("binance_context_jobs", order="created_at.desc", limit=20),
         "baseline_context_jobs": db.select("binance_baseline_context_jobs", order="created_at.desc", limit=20),
+        "external_validation_jobs": db.select("binance_external_validation_jobs", order="created_at.desc", limit=20),
+        "candidate_register_sha256": register_sha256(),
         "worker": db.select("binance_worker_heartbeats", filters={"worker_name": "eq.main"}, limit=1),
     }

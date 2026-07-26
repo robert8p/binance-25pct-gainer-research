@@ -759,6 +759,9 @@ class MatchedControlBuilder:
         min_entry_notional = float(job.get("min_entry_notional") or 500)
         discovery_pct = int(job.get("discovery_pct") or 70)
         validation_pct = int(job.get("validation_pct") or 15)
+        research_purpose = str(job.get("research_purpose") or "chatgpt_discovery")
+        if research_purpose not in {"chatgpt_discovery", "external_validation_c2_c4"}:
+            raise ValueError("Unsupported matched-control research_purpose")
 
         events = self.db.select_all(
             "binance_gainer_events",
@@ -784,30 +787,59 @@ class MatchedControlBuilder:
         load_start = scan_start - timedelta(days=prior_days + math.ceil(max(horizons) / 1440) + 1)
         load_end = scan_end
 
-        split_map, split_summary = assign_temporal_splits(events, discovery_pct, validation_pct)
-        # Event dates set the chronological cut points, but controls may come
-        # from any completed UTC day inside the corresponding date range. Using
-        # only dates that happened to contain an event would waste most of the
-        # available non-event history and bias controls toward event-heavy days.
-        discovery_event_dates = sorted(day for day, assigned in split_map.items() if assigned == "discovery")
-        validation_event_dates = sorted(day for day, assigned in split_map.items() if assigned == "validation")
-        discovery_end = max(discovery_event_dates) if discovery_event_dates else scan_start
-        validation_end = max(validation_event_dates) if validation_event_dates else discovery_end
-        split_dates: dict[str, set[date]] = {split: set() for split in SPLITS}
-        cursor = scan_start
-        while cursor < scan_end:
-            if cursor <= discovery_end:
-                split_dates["discovery"].add(cursor)
-            elif cursor <= validation_end:
-                split_dates["validation"].add(cursor)
-            else:
-                split_dates["sealed_test"].add(cursor)
-            cursor += timedelta(days=1)
-        for row in split_summary:
-            row["control_calendar_days"] = len(split_dates[row["split"]])
-            if split_dates[row["split"]]:
-                row["control_start_date"] = min(split_dates[row["split"]]).isoformat()
-                row["control_end_date"] = max(split_dates[row["split"]]).isoformat()
+        if research_purpose == "external_validation_c2_c4":
+            split_map = {
+                date.fromisoformat(str(event["event_date"])): "external_validation"
+                for event in events
+            }
+            all_calendar_days: set[date] = set()
+            cursor = scan_start
+            while cursor < scan_end:
+                all_calendar_days.add(cursor)
+                cursor += timedelta(days=1)
+            split_dates: dict[str, set[date]] = {"external_validation": all_calendar_days}
+            event_days = sorted(split_map)
+            split_summary = [
+                {
+                    "split": "external_validation",
+                    "start_date": min(event_days).isoformat() if event_days else None,
+                    "end_date": max(event_days).isoformat() if event_days else None,
+                    "event_dates": len(event_days),
+                    "events": len(events),
+                    "control_calendar_days": len(all_calendar_days),
+                    "control_start_date": min(all_calendar_days).isoformat() if all_calendar_days else None,
+                    "control_end_date": max(all_calendar_days).isoformat() if all_calendar_days else None,
+                }
+            ]
+            # The dedicated evaluator reads matches from Supabase and creates storage-safe
+            # feature parts. Avoid duplicating a very large intermediate feature ZIP here.
+            package_splits = tuple()
+        else:
+            split_map, split_summary = assign_temporal_splits(events, discovery_pct, validation_pct)
+            # Event dates set the chronological cut points, but controls may come
+            # from any completed UTC day inside the corresponding date range. Using
+            # only dates that happened to contain an event would waste most of the
+            # available non-event history and bias controls toward event-heavy days.
+            discovery_event_dates = sorted(day for day, assigned in split_map.items() if assigned == "discovery")
+            validation_event_dates = sorted(day for day, assigned in split_map.items() if assigned == "validation")
+            discovery_end = max(discovery_event_dates) if discovery_event_dates else scan_start
+            validation_end = max(validation_event_dates) if validation_event_dates else discovery_end
+            split_dates = {split: set() for split in SPLITS}
+            cursor = scan_start
+            while cursor < scan_end:
+                if cursor <= discovery_end:
+                    split_dates["discovery"].add(cursor)
+                elif cursor <= validation_end:
+                    split_dates["validation"].add(cursor)
+                else:
+                    split_dates["sealed_test"].add(cursor)
+                cursor += timedelta(days=1)
+            for row in split_summary:
+                row["control_calendar_days"] = len(split_dates[row["split"]])
+                if split_dates[row["split"]]:
+                    row["control_start_date"] = min(split_dates[row["split"]]).isoformat()
+                    row["control_end_date"] = max(split_dates[row["split"]]).isoformat()
+            package_splits = SPLITS
         for event in events:
             event["split"] = split_map[date.fromisoformat(str(event["event_date"]))]
 
@@ -1014,12 +1046,17 @@ class MatchedControlBuilder:
             split_df = pd.DataFrame(split_summary)
 
             design = {
-                "version": "v1_1_chatgpt_led_matched_controls",
+                "version": "v1_2_external_validation_matched_controls" if research_purpose == "external_validation_c2_c4" else "v1_1_chatgpt_led_matched_controls",
+                "research_purpose": research_purpose,
                 "source_scan_id": scan_id,
                 "event_definition": "25% low-to-later-high crossing within conservative 480-minute rolling window",
                 "positive_sample": "saleable scanner event anchored to the exact crossing trade where available",
                 "controls_per_event_requested": controls_per_event,
-                "control_universe": "same Binance spot symbol and same chronological split only",
+                "control_universe": (
+                    "same Binance spot symbol anywhere inside the fixed external-validation period"
+                    if research_purpose == "external_validation_c2_c4"
+                    else "same Binance spot symbol and same chronological split only"
+                ),
                 "matching_variables": ["symbol", "UTC clock time", "weekday preference", "calendar proximity"],
                 "matching_does_not_use": ["returns", "volume", "volatility", "future price path except outcome exclusion"],
                 "control_exclusions": {
@@ -1032,14 +1069,26 @@ class MatchedControlBuilder:
                 "decision_horizons_minutes": list(horizons),
                 "predictor_history_days": prior_days,
                 "feature_cutoff": "only fully completed one-minute bars strictly before each decision timestamp",
-                "split_percent_targets": {
-                    "discovery": discovery_pct,
-                    "validation": validation_pct,
-                    "sealed_test": 100 - discovery_pct - validation_pct,
-                },
-                "split_method": "chronological UTC event dates; a date is never divided across splits; controls stay in their event split",
+                "split_percent_targets": (
+                    {"external_validation": 100}
+                    if research_purpose == "external_validation_c2_c4"
+                    else {
+                        "discovery": discovery_pct,
+                        "validation": validation_pct,
+                        "sealed_test": 100 - discovery_pct - validation_pct,
+                    }
+                ),
+                "split_method": (
+                    "entire fixed non-overlapping period is one external-validation set"
+                    if research_purpose == "external_validation_c2_c4"
+                    else "chronological UTC event dates; a date is never divided across splits; controls stay in their event split"
+                ),
                 "independence_warning": "observations are clustered by coin, event and overlapping time; row counts are not independent sample counts",
-                "sealed_test_rule": "do not inspect sealed_test features until ChatGPT has frozen the complete candidate rule",
+                "sealed_test_rule": (
+                    "the prior sealed-test package is not accessed by this external-validation release"
+                    if research_purpose == "external_validation_c2_c4"
+                    else "do not inspect sealed_test features until ChatGPT has frozen the complete candidate rule"
+                ),
             }
             quality_report = {
                 "events_total": len(events),
@@ -1084,7 +1133,7 @@ class MatchedControlBuilder:
                 return storage_path
 
             package_paths: dict[str, str] = {}
-            for split in SPLITS:
+            for split in package_splits:
                 folder = work / split
                 folder.mkdir(parents=True, exist_ok=True)
                 split_samples = sample_df[sample_df["split"] == split].copy() if not sample_df.empty else sample_df
@@ -1122,14 +1171,23 @@ class MatchedControlBuilder:
                     {
                         "split": split,
                         "storage_path": package_paths.get(split),
-                        "instruction": "Keep sealed" if split == "sealed_test" else "Available for staged analysis",
+                        "instruction": (
+                            "Fixed C2/C4 external validation only"
+                            if split == "external_validation"
+                            else ("Keep sealed" if split == "sealed_test" else "Available for staged analysis")
+                        ),
                     }
-                    for split in SPLITS
+                    for split in package_splits
                 ]
             ).to_csv(index_folder / "package_manifest.csv", index=False)
             (index_folder / "research_design.json").write_text(json.dumps(design, indent=2, default=_json_ready), encoding="utf-8")
             (index_folder / "quality_report.json").write_text(json.dumps(quality_report, indent=2, default=_json_ready), encoding="utf-8")
-            write_analysis_contract(index_folder, "matched_control_index")
+            write_analysis_contract(
+                index_folder,
+                "matched_control_external_validation_index"
+                if research_purpose == "external_validation_c2_c4"
+                else "matched_control_index",
+            )
             (index_folder / "README.txt").write_text(
                 "This index intentionally excludes all split feature matrices. Download discovery first, validation only after candidates are fixed, and sealed_test last.\n",
                 encoding="utf-8",
@@ -1146,6 +1204,8 @@ class MatchedControlBuilder:
                 "feature_rows": len(feature_rows),
                 "failures": failures,
                 "index_storage_path": index_storage_path,
+                "research_purpose": research_purpose,
+                "external_validation_storage_path": package_paths.get("external_validation"),
                 "discovery_storage_path": package_paths.get("discovery"),
                 "validation_storage_path": package_paths.get("validation"),
                 "sealed_test_storage_path": package_paths.get("sealed_test"),

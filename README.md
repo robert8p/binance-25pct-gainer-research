@@ -1,37 +1,39 @@
-# Binance 8-Hour 25% Gainer Research — V1.1.0
+# Binance 25% Frozen C2/C4 External Validation — V1.2.0
 
-A direct-deployment application for finding saleable Binance Spot assets that rise at least **25% within 480 completed minutes** and packaging neutral evidence for **ChatGPT-led pattern discovery**.
+This is a dedicated historical validation release. It does **not** discover patterns.
 
-## Fixed event definition
+ChatGPT previously identified and froze two provisional precursor rules. This app now:
 
-- Threshold: 25%
-- Window: 480 minutes
-- Canonical quote preference: USDT, USDC, FDUSD
-- Default saleability requirement: 500 quote units of seller-initiated execution within 300 seconds of crossing
-- Event identity: `v1_25pct_rolling_8h`
+1. scans a fixed non-overlapping historical period;
+2. constructs five same-symbol controls per saleable 25% event;
+3. calculates one neutral feature snapshot exactly 480 minutes before each event/control anchor;
+4. mechanically evaluates C2 and C4 without changing them;
+5. packages the raw evidence and results for independent reproduction in ChatGPT.
 
-## Division of responsibility
+## Fixed period
 
-The application:
+- Start: `2026-01-01` UTC, inclusive
+- End: `2026-05-26` UTC, exclusive
+- Human-readable coverage: 1 January through 25 May 2026
 
-1. identifies events and verifies saleability;
-2. constructs same-symbol non-event controls;
-3. computes neutral continuous measurements using only data available before each decision timestamp;
-4. creates chronological discovery, validation and sealed-test packages;
-5. records provenance, quality and contamination diagnostics.
+## Frozen candidates
 
-ChatGPT:
+### C2
 
-1. audits the research packages;
-2. identifies patterns, directions, interactions and regimes;
-3. selects candidate thresholds using discovery data only;
-4. freezes candidate rules;
-5. validates them once and later reviews the sealed test.
+```text
+close_vs_1440m_low_pct >= 6.0
+AND quote_volume_60m_vs_prior_7d_same_time >= 3.0
+```
 
-No inherited 50% hypothesis, confirmation signal, composite score or trading-rule backtest is included.
+### C4
 
-Every research export includes `CHATGPT_ANALYSIS_PROMPT.md`, `ROLE_CONTRACT.json`, `FEATURE_DICTIONARY.md` and `ANALYSIS_GUARDRAILS.md`.
+```text
+max_runup_720m_pct >= 10.0
+AND volatility_1d_to_7d_ratio >= 0.30
+```
 
-## Deployment
+The app cannot search for new rules, retune thresholds, combine C2 and C4, or inspect the prior sealed-test package.
 
-Follow `DEPLOYMENT.md`. Use a new Supabase project, GitHub repository and Render Blueprint.
+## Upgrade
+
+Follow `DEPLOYMENT.md`. Run `supabase/migrate_v1_2_0_external_validation.sql` before deploying the new worker.

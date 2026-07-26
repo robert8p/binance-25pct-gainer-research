@@ -1,21 +1,22 @@
-# Data contract — Binance 25% research V1.1
+# V1.2 external-validation data contract
 
-## Event
+The canonical raw file is `external_validation_features.parquet` inside one or more numbered ZIP parts.
 
-A saleable event is the earliest later one-minute high at least **25%** above the latest occurrence of the lowest prior one-minute low in a conservative **480-minute** rolling window.
+Each sample has one feature row at `pre_cross_horizon_minutes = 480`.
 
-Default saleability requires at least **500 quote units** of seller-initiated execution at any price during the **300 seconds** after the exact crossing trade. This tests whether a position could be sold, not whether it could be sold at the threshold price.
+Key grouping fields:
 
-## Controls
+- `match_group_id`: one saleable event and its same-symbol controls
+- `label`: 1 event, 0 control
+- `symbol`
+- `cross_anchor_time`
 
-Each event is paired with same-symbol historical controls where available. At each control decision time, the application uses prior completed bars only, rejects 25%-contaminated windows, applies the configured pre-decision liquidity floor and preserves chronological splits.
+Quality filters applied by the evaluator:
 
-## Neutral measurements
+- `feature_quality_status == pass`
+- controls with `pseudo_window_contaminated_control == true` excluded
+- matched group requires one usable event and at least one usable control
 
-The application may calculate continuous returns, ranges, volume, trade intensity, volatility, market-relative measurements, distribution summaries, data-quality diagnostics and execution-liquidity fields. It must not turn those measurements into hypotheses, pass/fail signal components, scores or trading rules.
+The package contains `C2_pass` and `C4_pass` only because these definitions were frozen before this external period was opened. They are mechanical evaluations, not app-discovered signals.
 
-Ten-day and baseline-aligned feature rows end before their stated decision timestamp. Every column beginning `outcome_` is a label or diagnostic and must not be used as a predictor.
-
-## Research boundary
-
-ChatGPT is the pattern-discovery engine. No 25%-specific confirmation signal or trading rule is frozen in this release.
+All columns beginning `outcome_` are diagnostic labels and must not be used to modify the frozen rules.

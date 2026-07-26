@@ -1,0 +1,51 @@
+{
+  "candidates": [
+    {
+      "definition": "close_vs_1440m_low_pct >= 6.0 AND quote_volume_60m_vs_prior_7d_same_time >= 3.0",
+      "id": "C2",
+      "name": "24h rebound plus acute 60m volume spike"
+    },
+    {
+      "definition": "max_runup_720m_pct >= 10.0 AND volatility_1d_to_7d_ratio >= 0.30",
+      "id": "C4",
+      "name": "12h run-up plus elevated short/long volatility ratio"
+    }
+  ],
+  "decision_horizon_minutes_before_cross": 480,
+  "event_definition": "saleable 25% low-to-later-high crossing within 480 completed minutes",
+  "external_validation_window": {
+    "end_utc_exclusive": "2026-05-26",
+    "human_readable": "1 January through 25 May 2026 UTC",
+    "start_utc_inclusive": "2026-01-01"
+  },
+  "parent_candidate_register_sha256": "a5ca94ff9b464cb1f28def2e1c3db90bfab5e707d2c6d373a8587207d9f2ecd8",
+  "pass_criteria": {
+    "date_cluster_95pct_ci_lower_bound_must_exceed": 0.0,
+    "maximum_single_symbol_share_of_positive_advantage": 0.1,
+    "minimum_eligible_months": 4,
+    "minimum_event_dates": 30,
+    "minimum_fraction_of_eligible_months_with_positive_effect": 0.75,
+    "minimum_groups_per_eligible_month": 20,
+    "minimum_matched_lift": 1.5,
+    "minimum_median_eligible_month_lift": 1.25,
+    "minimum_symbols": 50,
+    "minimum_usable_matched_groups": 200,
+    "no_threshold_retuning": true,
+    "rules_evaluated_separately": true,
+    "symbol_cluster_95pct_ci_lower_bound_must_exceed": 0.0
+  },
+  "prohibitions": [
+    "no new feature search",
+    "no threshold retuning",
+    "no C2+C4 combination",
+    "no access to the prior sealed-test package",
+    "no trading or profitability conclusion from this stage alone"
+  ],
+  "purpose": "larger_non_overlapping_external_validation_only",
+  "release": "1.2.0",
+  "row_filters": {
+    "feature_quality_status": "pass",
+    "matched_group_requires": "exactly one event and at least one control",
+    "pseudo_window_contaminated_control": false
+  }
+}

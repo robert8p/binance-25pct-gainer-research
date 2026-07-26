@@ -177,6 +177,13 @@ class SupabaseClient:
                     wait = int(response.headers.get("Retry-After", "0") or 0) or min(30, 2 ** attempt)
                     time.sleep(wait)
                     continue
+                if response.status_code == 413:
+                    raise SupabaseError(
+                        f"Storage upload failed (413): {local_path.name} is "
+                        f"{local_path.stat().st_size:,} bytes and exceeds the configured "
+                        "Supabase object-size limit. The ChatGPT-led package builder should "
+                        "split files below MAX_STORAGE_OBJECT_BYTES."
+                    )
                 raise SupabaseError(
                     f"Storage upload failed ({response.status_code}): {response.text[:1000]}"
                 )

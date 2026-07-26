@@ -1,0 +1,32 @@
+{
+  "research_stage": "frozen_before_validation",
+  "decision_horizon_minutes": 480,
+  "row_filters": {
+    "feature_quality_status": "pass",
+    "pseudo_window_contaminated_control": false,
+    "matched_group_required": true
+  },
+  "candidates": [
+    {
+      "id": "C1",
+      "rule": "close_vs_1440m_low_pct >= 6.0 AND volume_share_last_1d_of_3d >= 0.3333333333333333"
+    },
+    {
+      "id": "C2",
+      "rule": "close_vs_1440m_low_pct >= 6.0 AND quote_volume_60m_vs_prior_7d_same_time >= 3.0"
+    },
+    {
+      "id": "C3",
+      "rule": "close_vs_1440m_low_pct >= 6.0 AND volume_share_last_1d_of_3d >= 0.3333333333333333 AND quote_volume_60m_vs_prior_7d_same_time >= 3.0"
+    },
+    {
+      "id": "C4",
+      "rule": "max_runup_720m_pct >= 10.0 AND volatility_1d_to_7d_ratio >= 0.30"
+    }
+  ],
+  "validation_policy": {
+    "no_threshold_retuning": true,
+    "number_of_candidates": 4,
+    "bonferroni_alpha_per_candidate": 0.0125
+  }
+}

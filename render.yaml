@@ -39,6 +39,8 @@ services:
         sync: false
       - key: SUPABASE_STORAGE_BUCKET
         value: binance-25pct-gainer-research
+      - key: MAX_STORAGE_OBJECT_BYTES
+        value: 45000000
       - key: TEMP_DATA_DIR
         value: /var/data
       - key: BINANCE_API_BASE_URLS

@@ -26,6 +26,7 @@ from .matched_controls import (
     safe_pct,
 )
 from .supabase import SupabaseClient
+from .package_utils import build_grouped_zip_parts
 
 CONTEXT_WINDOWS = (15, 30, 60, 120, 180, 360, 480, 720, 1440, 2880, 4320, 7200, 10080, 14400)
 REFERENCE_SYMBOLS = ("BTCUSDT", "ETHUSDT", "BNBUSDT")
@@ -610,43 +611,86 @@ class TenDayContextBuilder:
                 uploaded.append(record)
                 return storage_path
 
-            package_paths: dict[str, str] = {}
-            if research_mode == "exploratory_reuse":
-                folder = work / "exploratory"
-                folder.mkdir(parents=True, exist_ok=True)
-                sample_df.to_csv(folder / "sample_anchors.csv", index=False)
-                feature_df.to_csv(folder / "ten_day_context_features.csv", index=False)
-                feature_df.to_parquet(folder / "ten_day_context_features.parquet", index=False, compression="zstd")
-                quality_df.to_csv(folder / "data_quality.csv", index=False)
-                (folder / "design.json").write_text(json.dumps(design, indent=2, default=_json_ready), encoding="utf-8")
-                write_analysis_contract(folder, "ten_day_context_exploratory")
-                (folder / "README.txt").write_text(
-                    "EXPLORATORY ONLY. Split-sealing is not enforced in this package. Use it for ChatGPT-led discovery or implementation audit, not final confirmation.\n",
-                    encoding="utf-8",
+            package_paths: dict[str, list[str]] = {}
+
+            def group_ids_for(samples_part: pd.DataFrame) -> list[str]:
+                if samples_part.empty or "match_group_id" not in samples_part:
+                    return []
+                return samples_part["match_group_id"].dropna().astype(str).drop_duplicates().tolist()
+
+            def build_parts(split_name: str, samples_part: pd.DataFrame,
+                            features_part: pd.DataFrame, quality_part: pd.DataFrame,
+                            readme: str) -> list[Path]:
+                def writer(folder: Path, selected_groups: list[str]) -> None:
+                    selected = set(selected_groups)
+                    if "__EMPTY_PACKAGE__" in selected:
+                        sample_chunk = samples_part.iloc[0:0].copy()
+                    else:
+                        sample_chunk = samples_part[
+                            samples_part["match_group_id"].astype(str).isin(selected)
+                        ].copy()
+                    sample_ids = set(sample_chunk["sample_id"].astype(str)) if "sample_id" in sample_chunk else set()
+                    feature_chunk = features_part[
+                        features_part["sample_id"].astype(str).isin(sample_ids)
+                    ].copy() if "sample_id" in features_part else features_part.iloc[0:0].copy()
+                    quality_chunk = quality_part[
+                        quality_part["sample_id"].astype(str).isin(sample_ids)
+                    ].copy() if "sample_id" in quality_part else quality_part.iloc[0:0].copy()
+
+                    folder.mkdir(parents=True, exist_ok=True)
+                    sample_chunk.to_csv(folder / "sample_anchors.csv", index=False)
+                    # Parquet is the canonical feature matrix. Omitting a duplicate
+                    # CSV materially reduces package size without losing information.
+                    feature_chunk.to_parquet(
+                        folder / "ten_day_context_features.parquet",
+                        index=False,
+                        compression="zstd",
+                    )
+                    quality_chunk.to_csv(folder / "data_quality.csv", index=False)
+                    (folder / "design.json").write_text(
+                        json.dumps(design, indent=2, default=_json_ready), encoding="utf-8"
+                    )
+                    write_analysis_contract(folder, f"ten_day_context_{split_name}")
+                    (folder / "README.txt").write_text(
+                        readme
+                        + "\nThe canonical feature matrix is Parquet. ChatGPT should load every part for this split before analysing it.\n",
+                        encoding="utf-8",
+                    )
+
+                return build_grouped_zip_parts(
+                    work_dir=work,
+                    base_name=f"ten_day_context_{split_name}",
+                    group_ids=group_ids_for(samples_part),
+                    writer=writer,
                 )
-                path = work / "ten_day_context_exploratory.zip"
-                _zip_directory(folder, path)
-                package_paths["exploratory"] = upload(path, "ten_day_context_exploratory", None)
+
+            if research_mode == "exploratory_reuse":
+                paths = build_parts(
+                    "exploratory",
+                    sample_df,
+                    feature_df,
+                    quality_df,
+                    "EXPLORATORY ONLY. Split-sealing is not enforced in this package. Use it for ChatGPT-led discovery or implementation audit, not final confirmation.\n",
+                )
+                package_paths["exploratory"] = [
+                    upload(path, "ten_day_context_exploratory", None) for path in paths
+                ]
             else:
                 for split in SPLITS:
-                    folder = work / split
-                    folder.mkdir(parents=True, exist_ok=True)
                     split_samples = sample_df[sample_df["split"] == split].copy()
                     split_features = feature_df[feature_df["split"] == split].copy()
                     split_quality = quality_df[quality_df["split"] == split].copy()
-                    split_samples.to_csv(folder / "sample_anchors.csv", index=False)
-                    split_features.to_csv(folder / "ten_day_context_features.csv", index=False)
-                    split_features.to_parquet(folder / "ten_day_context_features.parquet", index=False, compression="zstd")
-                    split_quality.to_csv(folder / "data_quality.csv", index=False)
-                    (folder / "research_design.json").write_text(json.dumps(design, indent=2, default=_json_ready), encoding="utf-8")
-                    write_analysis_contract(folder, f"ten_day_context_{split}")
-                    (folder / "README.txt").write_text(
-                        f"Ten-day context {split} package.\n" + ("DO NOT OPEN UNTIL FINAL RULES ARE FROZEN.\n" if split == "sealed_test" else ""),
-                        encoding="utf-8",
+                    paths = build_parts(
+                        split,
+                        split_samples,
+                        split_features,
+                        split_quality,
+                        f"Ten-day context {split} package.\n"
+                        + ("DO NOT OPEN UNTIL FINAL RULES ARE FROZEN.\n" if split == "sealed_test" else ""),
                     )
-                    path = work / f"ten_day_context_{split}.zip"
-                    _zip_directory(folder, path)
-                    package_paths[split] = upload(path, f"ten_day_context_{split}", split)
+                    package_paths[split] = [
+                        upload(path, f"ten_day_context_{split}", split) for path in paths
+                    ]
 
             index = work / "index"
             index.mkdir(parents=True, exist_ok=True)

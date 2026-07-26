@@ -1,11 +1,28 @@
-# 25% ChatGPT-led research protocol
+# V1.2 external-validation protocol
 
-The target is a saleable rise of at least 25% from a prior completed one-minute low to a later high within a conservative 480-minute rolling window.
+## Purpose
 
-The application is not a pattern-analysis engine. It performs data acquisition, event/control construction, neutral feature calculation, leakage controls and chronological packaging. ChatGPT performs blank-canvas pattern discovery.
+Test only the two ChatGPT-frozen candidates C2 and C4 on a larger period that does not overlap the original discovery/validation/sealed cohort.
 
-Controls use the same symbol and comparable historical timing and are rejected where a 25% crossing contaminates the applicable window. Predictor data end before each decision timestamp.
+## Fixed design
 
-Use discovery first. ChatGPT must specify and freeze candidate feature definitions, directions, thresholds, exclusions and timing before validation is opened. Validation is viewed once without retuning. The sealed test remains closed until the complete candidate rule is frozen.
+- Historical window: 2026-01-01 inclusive to 2026-05-26 exclusive.
+- Saleable event: 25% low-to-later-high crossing within 480 completed minutes.
+- Five same-symbol controls requested per event.
+- Ten days of point-in-time history.
+- Decision snapshot: exactly 480 minutes before event/control anchor.
+- Quality: `feature_quality_status == pass`.
+- Contaminated controls excluded.
+- Exactly one usable event and at least one usable control per matched group.
 
-Rules discovered from the 50% population must not be assumed to generalise to the 25% population.
+## Rules
+
+C2 and C4 are reproduced from `FROZEN_EXTERNAL_VALIDATION_REGISTER.json`. No other candidate is evaluated.
+
+## Passing standard
+
+The release freezes the criteria in the register before the new cohort is processed, including sample/date/symbol breadth, lift, date- and symbol-cluster confidence intervals, symbol concentration and monthly stability.
+
+## Boundaries
+
+This is validation of predictive association, not continuous signal incidence or executable profitability. The prior sealed-test package remains untouched.

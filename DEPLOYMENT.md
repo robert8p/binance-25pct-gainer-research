@@ -1,36 +1,116 @@
-# Simple deployment instructions — V1.1.0
+# V1.2.0 upgrade and run instructions
 
-## 1. Create a new Supabase project
+Use the existing 25% Supabase project, GitHub repository and Render Blueprint. This release is additive and preserves earlier outputs.
 
-Do not reuse the 50% app database. In the new project, open **SQL Editor**, paste the entire contents of `supabase/schema.sql`, and run it once.
+## 1. Stop the old worker
 
-## 2. Create a new private GitHub repository
+Suspend the current Render worker before changing the database or code.
 
-Upload the contents of this ZIP so `app`, `docs`, `supabase`, `render.yaml` and `requirements.txt` are at repository root.
+Do not delete historical jobs or the previous sealed-test files.
 
-## 3. Create a Render Blueprint
+## 2. Update Supabase
 
-Connect the new repository. Render creates:
+Open Supabase **SQL Editor**, create a new query, and run the full contents of:
 
-- `binance-25pct-scanner-web`
-- `binance-25pct-scanner-worker`
-
-Enter the new Supabase URL, new server-side secret key and a strong app password when prompted. The Supabase secret can begin `sb_secret_`; place it in `SUPABASE_SERVICE_ROLE_KEY`.
-
-## 4. Verify
-
-Open the Render web-service URL followed by `/health`. It should show:
-
-```json
-{"status":"ok","version":"1.1.0","target":"25pct_within_8h","event_definition_version":"v1_25pct_rolling_8h"}
+```text
+supabase/migrate_v1_2_0_external_validation.sql
 ```
 
-Then open the main URL. Username: `rob`. Password: the `APP_PASSWORD` entered in Render.
+The migration:
 
-## 5. First run
+- tags discovery and external-validation jobs separately;
+- permits an `external_validation` control cohort;
+- creates the new evaluation job/file tables;
+- includes the earlier baseline-column correction;
+- changes no prior research results.
 
-Run a two-day scan first, then a 60-day scan. The 25% threshold and eight-hour window are fixed in code and database.
+## 3. Replace the GitHub files
 
-Build matched controls, then choose **Fresh staged discovery/validation/sealed** for the ten-day and baseline-context packages. Download and upload the discovery packages to ChatGPT first. Keep validation and sealed-test packages closed until ChatGPT freezes candidate rules.
+Upload everything inside this ZIP to the root of the existing private GitHub repository and replace the old files.
 
-Each analysis package includes a dedicated ChatGPT prompt, role contract, feature dictionary and guardrails.
+Repository root must show:
+
+```text
+app/
+docs/
+supabase/
+render.yaml
+requirements.txt
+README.md
+DEPLOYMENT.md
+```
+
+Commit with:
+
+```text
+Upgrade to V1.2 frozen C2 C4 external validation
+```
+
+## 4. Redeploy Render
+
+Deploy the latest commit for both services, or allow Auto-Deploy to finish.
+
+Keep the existing environment variables. No new secret is required.
+
+The worker is intentionally dedicated to V1.2 external-validation jobs and will not resume legacy discovery, ten-day-context or baseline-context jobs.
+
+## 5. Verify
+
+Open:
+
+```text
+https://YOUR-WEB-SERVICE.onrender.com/health
+```
+
+Expected fields include:
+
+```json
+{
+  "status": "ok",
+  "version": "1.2.0",
+  "purpose": "frozen_c2_c4_external_validation"
+}
+```
+
+Then open the dashboard and confirm a recent worker heartbeat.
+
+## 6. Run the three locked steps
+
+### Step 1
+
+Click **Queue fixed external-validation scan**.
+
+The app locks the period to 1 January–25 May 2026 and locks all event/execution settings.
+
+### Step 2
+
+After the scan is `completed` or `completed_with_warnings`, select it and click **Queue external-validation controls**.
+
+### Step 3
+
+After matched controls complete, select that job and click **Run frozen-rule evaluation**.
+
+The evaluator calculates only the 480-minute snapshot needed for C2 and C4. It does not build another discovery, validation or sealed split.
+
+## 7. Download the evidence
+
+Download:
+
+```text
+external_validation_index.zip
+```
+
+and every file beginning:
+
+```text
+external_validation_features
+```
+
+Upload all of them to ChatGPT together. ChatGPT should independently reproduce and interpret the fixed-rule test.
+
+## Important boundaries
+
+- Do not open the old sealed-test ZIP.
+- Do not change C2 or C4 thresholds after seeing the results.
+- A positive association is not yet a trading strategy.
+- Entry, exit, fees, slippage, signal frequency and drawdown require a later continuous execution backtest.
