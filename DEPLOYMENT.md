@@ -1,36 +1,116 @@
-# Alpaca 25% Gainer Research Lab — deployment
+# V1.2.0 upgrade and run instructions
 
-Use a new private GitHub repository and preferably a new Supabase project. The package also prefixes all tables with `stock25_`, so it can coexist with the 50% app if necessary.
+Use the existing 25% Supabase project, GitHub repository and Render Blueprint. This release is additive and preserves earlier outputs.
 
-## 1. Create the database
+## 1. Stop the old worker
 
-1. Create or open the Supabase project.
-2. Open **SQL Editor**.
-3. Copy all of `supabase/schema.sql`.
-4. Run it once.
-5. Confirm tables such as `stock25_scans`, `stock25_research_jobs`, `stock25_control_jobs`, `stock25_entry_jobs` and `stock25_backtest_jobs` exist.
+Suspend the current Render worker before changing the database or code.
 
-## 2. Upload to GitHub
+Do not delete historical jobs or the previous sealed-test files.
 
-Upload everything inside this extracted folder to the repository root. `render.yaml`, `Dockerfile`, `requirements.txt`, `app/` and `supabase/` must be visible at the top level.
+## 2. Update Supabase
 
-## 3. Deploy the Render Blueprint
+Open Supabase **SQL Editor**, create a new query, and run the full contents of:
 
-Create a Render Blueprint from the repository. It creates:
+```text
+supabase/migrate_v1_2_0_external_validation.sql
+```
 
-- `alpaca-25pct-scanner-web`
-- `alpaca-25pct-scanner-worker`
+The migration:
 
-Enter the requested Supabase, Alpaca and app-password secrets. Keep:
+- tags discovery and external-validation jobs separately;
+- permits an `external_validation` control cohort;
+- creates the new evaluation job/file tables;
+- includes the earlier baseline-column correction;
+- changes no prior research results.
 
-- `DEFAULT_THRESHOLD_PCT=25`
-- `ENABLE_BACKTEST_STAGE=false`
-- `SUPABASE_STORAGE_BUCKET=alpaca-25pct-research`
+## 3. Replace the GitHub files
 
-## 4. Verify
+Upload everything inside this ZIP to the root of the existing private GitHub repository and replace the old files.
 
-Open `/health`. It should report version `4.0.1-25pct` and target gain `25`.
+Repository root must show:
 
-## 5. Research sequence
+```text
+app/
+docs/
+supabase/
+render.yaml
+requirements.txt
+README.md
+DEPLOYMENT.md
+```
 
-Run Steps 1–4 in order, using a small pilot first and then the full run. Do not enable Step 5 merely because the source 50% package contained frozen rules. Freeze and validate a new 25%-specific rule set first.
+Commit with:
+
+```text
+Upgrade to V1.2 frozen C2 C4 external validation
+```
+
+## 4. Redeploy Render
+
+Deploy the latest commit for both services, or allow Auto-Deploy to finish.
+
+Keep the existing environment variables. No new secret is required.
+
+The worker is intentionally dedicated to V1.2 external-validation jobs and will not resume legacy discovery, ten-day-context or baseline-context jobs.
+
+## 5. Verify
+
+Open:
+
+```text
+https://YOUR-WEB-SERVICE.onrender.com/health
+```
+
+Expected fields include:
+
+```json
+{
+  "status": "ok",
+  "version": "1.2.0",
+  "purpose": "frozen_c2_c4_external_validation"
+}
+```
+
+Then open the dashboard and confirm a recent worker heartbeat.
+
+## 6. Run the three locked steps
+
+### Step 1
+
+Click **Queue fixed external-validation scan**.
+
+The app locks the period to 1 January–25 May 2026 and locks all event/execution settings.
+
+### Step 2
+
+After the scan is `completed` or `completed_with_warnings`, select it and click **Queue external-validation controls**.
+
+### Step 3
+
+After matched controls complete, select that job and click **Run frozen-rule evaluation**.
+
+The evaluator calculates only the 480-minute snapshot needed for C2 and C4. It does not build another discovery, validation or sealed split.
+
+## 7. Download the evidence
+
+Download:
+
+```text
+external_validation_index.zip
+```
+
+and every file beginning:
+
+```text
+external_validation_features
+```
+
+Upload all of them to ChatGPT together. ChatGPT should independently reproduce and interpret the fixed-rule test.
+
+## Important boundaries
+
+- Do not open the old sealed-test ZIP.
+- Do not change C2 or C4 thresholds after seeing the results.
+- A positive association is not yet a trading strategy.
+- Entry, exit, fees, slippage, signal frequency and drawdown require a later continuous execution backtest.
