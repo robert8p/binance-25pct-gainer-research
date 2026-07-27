@@ -1,4 +1,4 @@
-# V1.2 external-validation data contract
+# V1.3 external-validation data contract
 
 The canonical raw file is `external_validation_features.parquet` inside one or more numbered ZIP parts.
 

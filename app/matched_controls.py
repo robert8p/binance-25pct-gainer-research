@@ -18,6 +18,7 @@ import pandas as pd
 
 from .analysis_contract import write_analysis_contract
 from .binance import BinanceClient, archive_url, download_archive, normalize_archive_timestamp, sha256_file
+from .runtime import collect_memory, ensure_disk_headroom, log_resources
 from .supabase import SupabaseClient
 
 
@@ -218,7 +219,14 @@ class MinuteArchiveCache:
         stem = f"{symbol}-1m-{day.isoformat()}"
         return folder / f"{stem}.zip", folder / f"{stem}.parquet", folder / f"{stem}.missing"
 
-    def load_symbol(self, symbol: str, start_day: date, end_day_exclusive: date) -> LoadedSymbol:
+    def load_symbol(
+        self,
+        symbol: str,
+        start_day: date,
+        end_day_exclusive: date,
+        *,
+        required_columns: tuple[str, ...] | None = None,
+    ) -> LoadedSymbol:
         frames: list[pd.DataFrame] = []
         manifest: list[dict[str, Any]] = []
         day = start_day
@@ -265,6 +273,17 @@ class MinuteArchiveCache:
                             source = "public_rest_fallback"
                             status = "available"
                 if not frame.empty:
+                    # Drop unused columns before retaining each daily frame. This
+                    # avoids holding 155 days of full Binance kline schemas plus
+                    # the concatenated result at the same time.
+                    if required_columns is not None:
+                        daily_keep = list(dict.fromkeys(["open_time", *required_columns]))
+                        missing_daily = [column for column in daily_keep if column not in frame.columns]
+                        if missing_daily:
+                            raise RuntimeError(
+                                f"Required kline columns missing for {symbol} on {day}: {missing_daily}"
+                            )
+                        frame = frame[daily_keep].copy()
                     frames.append(frame)
                 checksum_path = archive_path if archive_path.exists() else fallback_path
                 manifest.append(
@@ -308,6 +327,12 @@ class MinuteArchiveCache:
             if column not in combined:
                 combined[column] = np.nan
         combined["observed"] = combined["close"].notna()
+        if required_columns is not None:
+            keep = list(dict.fromkeys([*required_columns, "observed"]))
+            missing = [column for column in keep if column not in combined.columns]
+            if missing:
+                raise RuntimeError(f"Required kline columns missing for {symbol}: {missing}")
+            combined = combined[keep].copy()
         combined.index.name = "open_time"
         return LoadedSymbol(combined, manifest)
 
@@ -742,31 +767,67 @@ def _json_ready(value: Any) -> Any:
 
 
 class MatchedControlBuilder:
-    def __init__(self, db: SupabaseClient, binance: BinanceClient, temp_root: Path):
+    """Memory-bounded, resumable matched-control builder for V1.3.
+
+    Only one event-symbol frame is resident at a time. Completed event matches
+    are written to Supabase immediately, so a worker restart resumes from the
+    first unfinished event rather than rebuilding the full period.
+    """
+
+    def __init__(
+        self,
+        db: SupabaseClient,
+        binance: BinanceClient,
+        temp_root: Path,
+        *,
+        minimum_disk_free_bytes: int = 750_000_000,
+    ):
         self.db = db
         self.binance = binance
         self.temp_root = temp_root
+        self.minimum_disk_free_bytes = minimum_disk_free_bytes
         self.cache = MinuteArchiveCache(binance, temp_root)
+
+    @staticmethod
+    def _match_payload(job_id: str, row: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "matched_control_job_id": job_id,
+            "event_id": row["event_id"],
+            "control_id": row["control_id"],
+            "symbol": row["symbol"],
+            "split": row["split"],
+            "event_anchor_time": row["event_anchor_time"],
+            "control_anchor_time": row["control_anchor_time"],
+            "control_rank": row["control_rank"],
+            "clock_offset_minutes": row["clock_offset_minutes"],
+            "calendar_distance_days": row["calendar_distance_days"],
+            "weekday_match": row["weekday_match"],
+            "match_tier": row["match_tier"],
+            "prior_global_reuse_count": row["prior_global_reuse_count"],
+            "minimum_5m_quote_volume": row["minimum_5m_quote_volume"],
+            "prior_history_observed_fraction": row["prior_history_observed_fraction"],
+            "quality_status": row["quality_status"],
+        }
 
     def run(self, job: dict[str, Any]) -> dict[str, Any]:
         job_id = str(job["id"])
         scan_id = str(job["scan_id"])
         controls_per_event = int(job.get("controls_per_event") or 5)
         prior_days = int(job.get("prior_days") or 10)
-        horizons = tuple(sorted({int(value) for value in (job.get("horizons_minutes") or [15, 30, 60, 120, 180, 480])}))
+        horizons = tuple(sorted({int(value) for value in (job.get("horizons_minutes") or [480])}))
         contamination_before = int(job.get("contamination_before_minutes") or max(horizons))
         contamination_after = int(job.get("contamination_after_minutes") or 480)
         min_entry_notional = float(job.get("min_entry_notional") or 500)
-        discovery_pct = int(job.get("discovery_pct") or 70)
-        validation_pct = int(job.get("validation_pct") or 15)
-        research_purpose = str(job.get("research_purpose") or "chatgpt_discovery")
-        if research_purpose not in {"chatgpt_discovery", "external_validation_c2_c4"}:
-            raise ValueError("Unsupported matched-control research_purpose")
+        research_purpose = str(job.get("research_purpose") or "")
+        if research_purpose != "external_validation_c2_c4":
+            raise ValueError("V1.3 processes only the frozen C2/C4 external-validation workflow")
+        if controls_per_event != 5 or prior_days != 10 or 480 not in horizons:
+            raise ValueError("External validation requires five controls, ten history days and horizon 480")
 
         events = self.db.select_all(
             "binance_gainer_events",
             filters={"scan_id": f"eq.{scan_id}", "sellability_pass": "eq.true"},
-            order="event_date.asc,symbol.asc",
+            order="event_date.asc,symbol.asc,id.asc",
         )
         if not events:
             raise RuntimeError("The selected scan has no saleable events")
@@ -774,8 +835,14 @@ class MatchedControlBuilder:
         if not scans:
             raise RuntimeError("Source scan not found")
         scan = scans[0]
-        if scan.get("event_definition_version") != "v1_25pct_rolling_8h" or int(scan.get("window_minutes") or 0) != 480:
-            raise ValueError("25% matched controls require a completed 480-minute v1_25pct_rolling_8h scan")
+        if (
+            scan.get("event_definition_version") != "v1_25pct_rolling_8h"
+            or int(scan.get("window_minutes") or 0) != 480
+            or float(scan.get("threshold_pct") or 0) != 25.0
+            or str(scan.get("research_purpose") or "") != "external_validation_c2_c4"
+        ):
+            raise ValueError("Source scan is not the locked 25% external-validation scan")
+
         result_json = scan.get("result_json") or {}
         if result_json.get("window_start") and result_json.get("window_end_exclusive"):
             scan_start = parse_datetime(result_json["window_start"]).date()
@@ -786,430 +853,273 @@ class MatchedControlBuilder:
             scan_end = max(event_dates) + timedelta(days=1)
         load_start = scan_start - timedelta(days=prior_days + math.ceil(max(horizons) / 1440) + 1)
         load_end = scan_end
-
-        if research_purpose == "external_validation_c2_c4":
-            split_map = {
-                date.fromisoformat(str(event["event_date"])): "external_validation"
-                for event in events
-            }
-            all_calendar_days: set[date] = set()
-            cursor = scan_start
-            while cursor < scan_end:
-                all_calendar_days.add(cursor)
-                cursor += timedelta(days=1)
-            split_dates: dict[str, set[date]] = {"external_validation": all_calendar_days}
-            event_days = sorted(split_map)
-            split_summary = [
-                {
-                    "split": "external_validation",
-                    "start_date": min(event_days).isoformat() if event_days else None,
-                    "end_date": max(event_days).isoformat() if event_days else None,
-                    "event_dates": len(event_days),
-                    "events": len(events),
-                    "control_calendar_days": len(all_calendar_days),
-                    "control_start_date": min(all_calendar_days).isoformat() if all_calendar_days else None,
-                    "control_end_date": max(all_calendar_days).isoformat() if all_calendar_days else None,
-                }
-            ]
-            # The dedicated evaluator reads matches from Supabase and creates storage-safe
-            # feature parts. Avoid duplicating a very large intermediate feature ZIP here.
-            package_splits = tuple()
-        else:
-            split_map, split_summary = assign_temporal_splits(events, discovery_pct, validation_pct)
-            # Event dates set the chronological cut points, but controls may come
-            # from any completed UTC day inside the corresponding date range. Using
-            # only dates that happened to contain an event would waste most of the
-            # available non-event history and bias controls toward event-heavy days.
-            discovery_event_dates = sorted(day for day, assigned in split_map.items() if assigned == "discovery")
-            validation_event_dates = sorted(day for day, assigned in split_map.items() if assigned == "validation")
-            discovery_end = max(discovery_event_dates) if discovery_event_dates else scan_start
-            validation_end = max(validation_event_dates) if validation_event_dates else discovery_end
-            split_dates = {split: set() for split in SPLITS}
-            cursor = scan_start
-            while cursor < scan_end:
-                if cursor <= discovery_end:
-                    split_dates["discovery"].add(cursor)
-                elif cursor <= validation_end:
-                    split_dates["validation"].add(cursor)
-                else:
-                    split_dates["sealed_test"].add(cursor)
-                cursor += timedelta(days=1)
-            for row in split_summary:
-                row["control_calendar_days"] = len(split_dates[row["split"]])
-                if split_dates[row["split"]]:
-                    row["control_start_date"] = min(split_dates[row["split"]]).isoformat()
-                    row["control_end_date"] = max(split_dates[row["split"]]).isoformat()
-            package_splits = SPLITS
+        split_dates = {"external_validation": set()}
+        cursor = scan_start
+        while cursor < scan_end:
+            split_dates["external_validation"].add(cursor)
+            cursor += timedelta(days=1)
         for event in events:
-            event["split"] = split_map[date.fromisoformat(str(event["event_date"]))]
+            event["split"] = "external_validation"
 
+        existing_progress = self.db.select_all(
+            "binance_matched_control_progress",
+            filters={"matched_control_job_id": f"eq.{job_id}"},
+        )
+        completed_event_ids = {
+            str(row["event_id"]) for row in existing_progress if row.get("status") == "completed"
+        }
+        existing_matches = self.db.select_all(
+            "binance_control_matches",
+            filters={"matched_control_job_id": f"eq.{job_id}"},
+            order="event_anchor_time.asc,control_rank.asc",
+        )
+        # A hard process kill can occur after controls were upserted but before
+        # the event checkpoint row was written. Remove only those uncommitted
+        # event matches so a resume cannot silently create more than five controls
+        # for one event or distort global reuse counts. Completed event matches
+        # remain untouched.
+        partial_event_ids = {
+            str(row["event_id"])
+            for row in existing_matches
+            if str(row["event_id"]) not in completed_event_ids
+        }
+        for partial_event_id in sorted(partial_event_ids):
+            self.db.delete(
+                "binance_control_matches",
+                {
+                    "matched_control_job_id": f"eq.{job_id}",
+                    "event_id": f"eq.{partial_event_id}",
+                },
+            )
+        if partial_event_ids:
+            existing_matches = [
+                row for row in existing_matches if str(row["event_id"]) not in partial_event_ids
+            ]
+
+        used_counts: Counter[tuple[str, datetime]] = Counter()
+        for row in existing_matches:
+            used_counts[(str(row["symbol"]), floor_minute(parse_datetime(row["control_anchor_time"])))] += 1
+
+        controls_created = len(existing_matches)
+        processed = len(completed_event_ids)
+        checkpoint = dict(job.get("checkpoint_json") or {})
+        checkpoint.update(
+            {
+                "schema_version": 1,
+                "phase": "matched_controls",
+                "events_total": len(events),
+                "events_completed": processed,
+                "controls_created": controls_created,
+            }
+        )
+        now_iso = datetime.now(timezone.utc).isoformat()
         self.db.update(
             "binance_matched_control_jobs",
             {"id": f"eq.{job_id}"},
             {
                 "events_total": len(events),
                 "controls_target": len(events) * controls_per_event,
-                "heartbeat_at": datetime.now(timezone.utc).isoformat(),
+                "events_processed": processed,
+                "controls_created": controls_created,
+                "feature_rows": 0,
+                "heartbeat_at": now_iso,
+                "checkpoint_json": checkpoint,
+                "last_stage": "matched_controls",
+                "last_checkpoint_at": now_iso,
             },
         )
+        log_resources(
+            "matched_controls_resume",
+            path=self.temp_root,
+            extra={"events_completed": processed, "events_total": len(events)},
+        )
 
-        work = Path(tempfile.mkdtemp(prefix=f"matched-{job_id}-", dir=self.temp_root))
-        source_manifest: list[dict[str, Any]] = []
-        sample_rows: list[dict[str, Any]] = []
-        feature_rows: list[dict[str, Any]] = []
-        match_rows: list[dict[str, Any]] = []
-        quality_rows: list[dict[str, Any]] = []
-        rejection_totals: Counter[str] = Counter()
-        failures = 0
-        used_counts: Counter[tuple[str, datetime]] = Counter()
-
-        try:
-            required_symbols = sorted(set(str(row["symbol"]) for row in events) | set(REFERENCE_SYMBOLS))
-            loaded: dict[str, LoadedSymbol] = {}
-            for symbol in REFERENCE_SYMBOLS:
-                loaded[symbol] = self.cache.load_symbol(symbol, load_start, load_end)
-                source_manifest.extend(loaded[symbol].source_manifest)
-            reference_frames = {symbol: loaded[symbol].frame for symbol in REFERENCE_SYMBOLS}
-
-            events_by_symbol: dict[str, list[dict[str, Any]]] = defaultdict(list)
-            for event in events:
+        events_by_symbol: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for event in events:
+            if str(event["id"]) not in completed_event_ids:
                 events_by_symbol[str(event["symbol"])].append(event)
 
-            processed = 0
-            for symbol, symbol_events in sorted(events_by_symbol.items()):
-                try:
-                    if symbol not in loaded:
-                        loaded[symbol] = self.cache.load_symbol(symbol, load_start, load_end)
-                        source_manifest.extend(loaded[symbol].source_manifest)
-                    frame = loaded[symbol].frame
-                    crossing_mask = rolling_crossing_mask(
-                        frame,
-                        threshold_pct=float(scan.get("threshold_pct") or 25),
-                        window_minutes=int(scan.get("window_minutes") or 480),
+        for symbol, pending_events in sorted(events_by_symbol.items()):
+            ensure_disk_headroom(self.temp_root, self.minimum_disk_free_bytes)
+            loaded: LoadedSymbol | None = None
+            frame: pd.DataFrame | None = None
+            crossing_mask: pd.Series | None = None
+            try:
+                loaded = self.cache.load_symbol(
+                    symbol,
+                    load_start,
+                    load_end,
+                    required_columns=("high", "low", "close", "quote_volume"),
+                )
+                frame = loaded.frame
+                crossing_mask = rolling_crossing_mask(
+                    frame,
+                    threshold_pct=25.0,
+                    window_minutes=480,
+                )
+                all_symbol_events = [row for row in events if str(row["symbol"]) == symbol]
+                known_anchors = [
+                    parse_datetime(row.get("first_cross_trade_time") or row["first_cross_time"])
+                    for row in all_symbol_events
+                ]
+                for event in pending_events:
+                    event_id = str(event["id"])
+                    controls, rejected = select_controls_for_event(
+                        event=event,
+                        split="external_validation",
+                        split_dates=split_dates["external_validation"],
+                        frame=frame,
+                        crossing_mask=crossing_mask,
+                        known_event_anchors=known_anchors,
+                        controls_per_event=controls_per_event,
+                        horizons=horizons,
+                        prior_days=prior_days,
+                        contamination_before_minutes=contamination_before,
+                        contamination_after_minutes=contamination_after,
+                        min_entry_notional=min_entry_notional,
+                        used_counts=used_counts,
                     )
-                    known_anchors = [
-                        parse_datetime(row.get("first_cross_trade_time") or row["first_cross_time"])
-                        for row in symbol_events
-                    ]
-                    for event in symbol_events:
-                        split = str(event["split"])
-                        event_anchor = parse_datetime(event.get("first_cross_trade_time") or event["first_cross_time"])
-                        event_sample = {
-                            "sample_id": f"event:{event['id']}",
-                            "match_group_id": str(event["id"]),
-                            "sample_type": "event",
-                            "label": 1,
-                            "split": split,
-                            "symbol": symbol,
-                            "base_asset": event.get("base_asset"),
-                            "quote_asset": event.get("quote_asset"),
-                            "event_id": str(event["id"]),
-                            "control_rank": None,
-                            "anchor_time": event_anchor.isoformat(),
-                            "source_event_date": str(event["event_date"]),
-                            "sellability_pass": bool(event.get("sellability_pass")),
-                            "minimum_exit_vwap_pct_vs_threshold": event.get("minimum_exit_vwap_pct_vs_threshold"),
-                            "quality_status": str(event.get("quality_status") or "unknown"),
-                        }
-                        sample_rows.append(event_sample)
-
-                        controls, rejected = select_controls_for_event(
-                            event=event,
-                            split=split,
-                            split_dates=split_dates[split],
-                            frame=frame,
-                            crossing_mask=crossing_mask,
-                            known_event_anchors=known_anchors,
-                            controls_per_event=controls_per_event,
-                            horizons=horizons,
-                            prior_days=prior_days,
-                            contamination_before_minutes=contamination_before,
-                            contamination_after_minutes=contamination_after,
-                            min_entry_notional=min_entry_notional,
-                            used_counts=used_counts,
+                    for row in controls:
+                        row["matched_control_job_id"] = job_id
+                    if controls:
+                        self.db.upsert(
+                            "binance_control_matches",
+                            [self._match_payload(job_id, row) for row in controls],
+                            on_conflict="matched_control_job_id,control_id",
                         )
-                        rejection_totals.update(rejected)
-                        for match in controls:
-                            match["matched_control_job_id"] = job_id
-                            match_rows.append(match)
-                            sample_rows.append(
-                                {
-                                    "sample_id": f"control:{match['control_id']}",
-                                    "match_group_id": str(event["id"]),
-                                    "sample_type": "control",
-                                    "label": 0,
-                                    "split": split,
-                                    "symbol": symbol,
-                                    "base_asset": event.get("base_asset"),
-                                    "quote_asset": event.get("quote_asset"),
-                                    "event_id": str(event["id"]),
-                                    "control_id": match["control_id"],
-                                    "control_rank": match["control_rank"],
-                                    "anchor_time": match["control_anchor_time"],
-                                    "source_event_date": str(event["event_date"]),
-                                    "sellability_pass": None,
-                                    "minimum_exit_vwap_pct_vs_threshold": None,
-                                    "quality_status": match["quality_status"],
-                                }
-                            )
-
-                        event_samples = [sample_rows[-(len(controls) + 1)]] + sample_rows[-len(controls):] if controls else [sample_rows[-1]]
-                        for sample in event_samples:
-                            for horizon in horizons:
-                                feature = compute_feature_row(
-                                    frame,
-                                    sample=sample,
-                                    horizon_minutes=horizon,
-                                    prior_days=prior_days,
-                                    min_entry_notional=min_entry_notional,
-                                    reference_frames=reference_frames,
-                                )
-                                feature_rows.append(feature)
-                                quality_rows.append(
-                                    {
-                                        "sample_id": feature["sample_id"],
-                                        "split": split,
-                                        "symbol": symbol,
-                                        "horizon_minutes": horizon,
-                                        "feature_quality_status": feature.get("feature_quality_status"),
-                                        "entry_liquidity_pass": feature.get("entry_liquidity_pass"),
-                                        "missing_minutes_prior_24h": feature.get("missing_minutes_prior_24h"),
-                                        "observed_fraction_prior_window": feature.get("observed_fraction_prior_window"),
-                                    }
-                                )
-
-                        if len(controls) < controls_per_event:
-                            self.db.insert(
-                                "binance_matched_control_issues",
-                                {
-                                    "matched_control_job_id": job_id,
-                                    "event_id": str(event["id"]),
-                                    "stage": "control_selection",
-                                    "message": f"Created {len(controls)} of {controls_per_event} requested controls",
-                                },
-                            )
-                        processed += 1
-                        self.db.update(
-                            "binance_matched_control_jobs",
-                            {"id": f"eq.{job_id}"},
+                    self.db.upsert(
+                        "binance_matched_control_progress",
+                        [
                             {
-                                "events_processed": processed,
-                                "controls_created": len(match_rows),
-                                "feature_rows": len(feature_rows),
-                                "heartbeat_at": datetime.now(timezone.utc).isoformat(),
+                                "matched_control_job_id": job_id,
+                                "event_id": event_id,
+                                "symbol": symbol,
+                                "status": "completed",
+                                "controls_created": len(controls),
+                                "rejection_json": dict(rejected),
+                                "error_message": None,
+                                "completed_at": datetime.now(timezone.utc).isoformat(),
+                            }
+                        ],
+                        on_conflict="matched_control_job_id,event_id",
+                    )
+                    if len(controls) < controls_per_event:
+                        self.db.insert(
+                            "binance_matched_control_issues",
+                            {
+                                "matched_control_job_id": job_id,
+                                "event_id": event_id,
+                                "stage": "control_selection",
+                                "message": f"Created {len(controls)} of {controls_per_event} requested controls",
                             },
                         )
-                except Exception as exc:
-                    failures += len(symbol_events)
-                    self.db.insert(
-                        "binance_matched_control_issues",
+                    completed_event_ids.add(event_id)
+                    processed += 1
+                    controls_created += len(controls)
+                    checkpoint.update(
                         {
-                            "matched_control_job_id": job_id,
-                            "event_id": None,
-                            "stage": f"symbol:{symbol}",
-                            "message": str(exc)[:4000],
+                            "phase": "matched_controls",
+                            "last_symbol": symbol,
+                            "last_event_id": event_id,
+                            "events_completed": processed,
+                            "controls_created": controls_created,
+                        }
+                    )
+                    now_iso = datetime.now(timezone.utc).isoformat()
+                    self.db.update(
+                        "binance_matched_control_jobs",
+                        {"id": f"eq.{job_id}"},
+                        {
+                            "events_processed": processed,
+                            "controls_created": controls_created,
+                            "feature_rows": 0,
+                            "heartbeat_at": now_iso,
+                            "checkpoint_json": checkpoint,
+                            "last_stage": "matched_controls",
+                            "last_unit": f"{symbol}:{event_id}",
+                            "last_checkpoint_at": now_iso,
                         },
                     )
-
-            if match_rows:
-                self.db.upsert(
-                    "binance_control_matches",
-                    [
-                        {
-                            "matched_control_job_id": row["matched_control_job_id"],
-                            "event_id": row["event_id"],
-                            "control_id": row["control_id"],
-                            "symbol": row["symbol"],
-                            "split": row["split"],
-                            "event_anchor_time": row["event_anchor_time"],
-                            "control_anchor_time": row["control_anchor_time"],
-                            "control_rank": row["control_rank"],
-                            "clock_offset_minutes": row["clock_offset_minutes"],
-                            "calendar_distance_days": row["calendar_distance_days"],
-                            "weekday_match": row["weekday_match"],
-                            "match_tier": row["match_tier"],
-                            "prior_global_reuse_count": row["prior_global_reuse_count"],
-                            "minimum_5m_quote_volume": row["minimum_5m_quote_volume"],
-                            "prior_history_observed_fraction": row["prior_history_observed_fraction"],
-                            "quality_status": row["quality_status"],
-                        }
-                        for row in match_rows
-                    ],
-                    on_conflict="matched_control_job_id,control_id",
-                )
-
-            sample_df = pd.DataFrame(sample_rows)
-            feature_df = pd.DataFrame(feature_rows)
-            match_df = pd.DataFrame(match_rows)
-            quality_df = pd.DataFrame(quality_rows)
-            source_df = pd.DataFrame(source_manifest)
-            split_df = pd.DataFrame(split_summary)
-
-            design = {
-                "version": "v1_2_external_validation_matched_controls" if research_purpose == "external_validation_c2_c4" else "v1_1_chatgpt_led_matched_controls",
-                "research_purpose": research_purpose,
-                "source_scan_id": scan_id,
-                "event_definition": "25% low-to-later-high crossing within conservative 480-minute rolling window",
-                "positive_sample": "saleable scanner event anchored to the exact crossing trade where available",
-                "controls_per_event_requested": controls_per_event,
-                "control_universe": (
-                    "same Binance spot symbol anywhere inside the fixed external-validation period"
-                    if research_purpose == "external_validation_c2_c4"
-                    else "same Binance spot symbol and same chronological split only"
-                ),
-                "matching_variables": ["symbol", "UTC clock time", "weekday preference", "calendar proximity"],
-                "matching_does_not_use": ["returns", "volume", "volatility", "future price path except outcome exclusion"],
-                "control_exclusions": {
-                    "known_event_buffer_hours": 24,
-                    "crossing_contamination_before_minutes": contamination_before,
-                    "crossing_contamination_after_minutes": contamination_after,
-                    "minimum_prior_5m_quote_volume": min_entry_notional,
-                    "minimum_prior_history_observed_fraction": 0.98,
-                },
-                "decision_horizons_minutes": list(horizons),
-                "predictor_history_days": prior_days,
-                "feature_cutoff": "only fully completed one-minute bars strictly before each decision timestamp",
-                "split_percent_targets": (
-                    {"external_validation": 100}
-                    if research_purpose == "external_validation_c2_c4"
-                    else {
-                        "discovery": discovery_pct,
-                        "validation": validation_pct,
-                        "sealed_test": 100 - discovery_pct - validation_pct,
-                    }
-                ),
-                "split_method": (
-                    "entire fixed non-overlapping period is one external-validation set"
-                    if research_purpose == "external_validation_c2_c4"
-                    else "chronological UTC event dates; a date is never divided across splits; controls stay in their event split"
-                ),
-                "independence_warning": "observations are clustered by coin, event and overlapping time; row counts are not independent sample counts",
-                "sealed_test_rule": (
-                    "the prior sealed-test package is not accessed by this external-validation release"
-                    if research_purpose == "external_validation_c2_c4"
-                    else "do not inspect sealed_test features until ChatGPT has frozen the complete candidate rule"
-                ),
-            }
-            quality_report = {
-                "events_total": len(events),
-                "controls_target": len(events) * controls_per_event,
-                "controls_created": len(match_rows),
-                "control_completion_pct": 100.0 * len(match_rows) / (len(events) * controls_per_event),
-                "events_without_full_control_count": int(
-                    sum(1 for event in events if sum(row["event_id"] == str(event["id"]) for row in match_rows) < controls_per_event)
-                ),
-                "feature_rows": len(feature_rows),
-                "feature_quality_counts": quality_df["feature_quality_status"].value_counts(dropna=False).to_dict() if not quality_df.empty else {},
-                "event_entry_liquidity_failures": int(
-                    quality_df[
-                        quality_df["sample_id"].astype(str).str.startswith("event:")
-                        & (quality_df["entry_liquidity_pass"] == False)  # noqa: E712
-                    ]["sample_id"].nunique()
-                ) if not quality_df.empty else 0,
-                "control_anchor_reuse_count": int(sum(1 for row in match_rows if row["prior_global_reuse_count"] > 0)),
-                "control_rejection_reasons": dict(rejection_totals),
-                "symbol_failures": failures,
-                "source_archive_status_counts": source_df["status"].value_counts(dropna=False).to_dict() if not source_df.empty else {},
-            }
-
-            uploaded: list[dict[str, Any]] = []
-            storage_prefix = f"matched-controls/{job_id}"
-
-            def upload_package(path: Path, role: str, split: str | None = None) -> str:
-                storage_path = f"{storage_prefix}/{path.name}"
-                self.db.upload_file(storage_path, path, "application/zip")
-                record = {
-                    "matched_control_job_id": job_id,
-                    "split": split,
-                    "storage_path": storage_path,
-                    "filename": path.name,
-                    "size_bytes": path.stat().st_size,
-                    "sha256": sha256_file(path),
-                    "content_type": "application/zip",
-                    "role": role,
-                }
-                self.db.upsert("binance_matched_control_files", [record], on_conflict="matched_control_job_id,storage_path")
-                uploaded.append(record)
-                return storage_path
-
-            package_paths: dict[str, str] = {}
-            for split in package_splits:
-                folder = work / split
-                folder.mkdir(parents=True, exist_ok=True)
-                split_samples = sample_df[sample_df["split"] == split].copy() if not sample_df.empty else sample_df
-                split_features = feature_df[feature_df["split"] == split].copy() if not feature_df.empty else feature_df
-                split_matches = match_df[match_df["split"] == split].copy() if not match_df.empty else match_df
-                split_quality = quality_df[quality_df["split"] == split].copy() if not quality_df.empty else quality_df
-                split_samples.to_csv(folder / "sample_anchors.csv", index=False)
-                split_features.to_csv(folder / "feature_matrix.csv", index=False)
-                split_features.to_parquet(folder / "feature_matrix.parquet", index=False, compression="zstd")
-                split_matches.to_csv(folder / "control_matches.csv", index=False)
-                split_quality.to_csv(folder / "data_quality.csv", index=False)
-                (folder / "research_design.json").write_text(json.dumps(design, indent=2, default=_json_ready), encoding="utf-8")
-                write_analysis_contract(folder, f"matched_control_{split}")
-                (folder / "README.txt").write_text(
-                    (
-                        f"Binance matched-control {split} package.\n"
-                        "Each event is paired with same-symbol non-surge controls.\n"
-                        "Feature rows are repeated at the fixed measurement horizons.\n"
-                        "All predictors use only fully completed one-minute bars before decision_time.\n"
-                        + ("DO NOT INSPECT THIS PACKAGE UNTIL THE COMPLETE CHATGPT-DISCOVERED RULE IS FROZEN.\n" if split == "sealed_test" else "")
-                    ),
-                    encoding="utf-8",
-                )
-                zip_path = work / f"matched_control_{split}.zip"
-                _zip_directory(folder, zip_path)
-                package_paths[split] = upload_package(zip_path, f"matched_control_{split}", split)
-
-            index_folder = work / "index"
-            index_folder.mkdir(parents=True, exist_ok=True)
-            split_df.to_csv(index_folder / "split_summary.csv", index=False)
-            pd.DataFrame(match_rows).to_csv(index_folder / "control_match_manifest.csv", index=False)
-            pd.DataFrame(source_manifest).to_csv(index_folder / "source_archive_manifest.csv", index=False)
-            pd.DataFrame(
-                [
+            except Exception as exc:
+                self.db.insert(
+                    "binance_matched_control_issues",
                     {
-                        "split": split,
-                        "storage_path": package_paths.get(split),
-                        "instruction": (
-                            "Fixed C2/C4 external validation only"
-                            if split == "external_validation"
-                            else ("Keep sealed" if split == "sealed_test" else "Available for staged analysis")
-                        ),
-                    }
-                    for split in package_splits
-                ]
-            ).to_csv(index_folder / "package_manifest.csv", index=False)
-            (index_folder / "research_design.json").write_text(json.dumps(design, indent=2, default=_json_ready), encoding="utf-8")
-            (index_folder / "quality_report.json").write_text(json.dumps(quality_report, indent=2, default=_json_ready), encoding="utf-8")
-            write_analysis_contract(
-                index_folder,
-                "matched_control_external_validation_index"
-                if research_purpose == "external_validation_c2_c4"
-                else "matched_control_index",
-            )
-            (index_folder / "README.txt").write_text(
-                "This index intentionally excludes all split feature matrices. Download discovery first, validation only after candidates are fixed, and sealed_test last.\n",
-                encoding="utf-8",
-            )
-            index_zip = work / "matched_control_index.zip"
-            _zip_directory(index_folder, index_zip)
-            index_storage_path = upload_package(index_zip, "matched_control_index", None)
+                        "matched_control_job_id": job_id,
+                        "event_id": None,
+                        "stage": f"symbol:{symbol}",
+                        "message": str(exc)[:4000],
+                    },
+                )
+                raise
+            finally:
+                del crossing_mask
+                del frame
+                del loaded
+                collect_memory()
+                log_resources(
+                    "matched_controls_symbol_checkpoint",
+                    path=self.temp_root,
+                    extra={"symbol": symbol, "events_completed": processed},
+                )
 
-            return {
-                "events_total": len(events),
-                "events_processed": len(events) - failures,
-                "controls_target": len(events) * controls_per_event,
-                "controls_created": len(match_rows),
-                "feature_rows": len(feature_rows),
-                "failures": failures,
-                "index_storage_path": index_storage_path,
-                "research_purpose": research_purpose,
-                "external_validation_storage_path": package_paths.get("external_validation"),
-                "discovery_storage_path": package_paths.get("discovery"),
-                "validation_storage_path": package_paths.get("validation"),
-                "sealed_test_storage_path": package_paths.get("sealed_test"),
-                "quality_report": quality_report,
+        progress_rows = self.db.select_all(
+            "binance_matched_control_progress",
+            filters={"matched_control_job_id": f"eq.{job_id}"},
+        )
+        final_matches = self.db.select_all(
+            "binance_control_matches",
+            filters={"matched_control_job_id": f"eq.{job_id}"},
+        )
+        completed_rows = [row for row in progress_rows if row.get("status") == "completed"]
+        controls_created = len(final_matches)
+        events_without_full = sum(
+            1 for row in completed_rows if int(row.get("controls_created") or 0) < controls_per_event
+        )
+        rejection_totals: Counter[str] = Counter()
+        for row in completed_rows:
+            rejection_totals.update(row.get("rejection_json") or {})
+        checkpoint.update(
+            {
+                "phase": "complete",
+                "events_completed": len(completed_rows),
+                "controls_created": controls_created,
             }
-        finally:
-            shutil.rmtree(work, ignore_errors=True)
+        )
+        self.db.update(
+            "binance_matched_control_jobs",
+            {"id": f"eq.{job_id}"},
+            {
+                "events_processed": len(completed_rows),
+                "controls_created": controls_created,
+                "feature_rows": 0,
+                "checkpoint_json": checkpoint,
+                "last_stage": "complete",
+                "last_checkpoint_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+        return {
+            "events_total": len(events),
+            "events_processed": len(completed_rows),
+            "controls_target": len(events) * controls_per_event,
+            "controls_created": controls_created,
+            "feature_rows": 0,
+            "failures": 0,
+            "research_purpose": research_purpose,
+            "quality_report": {
+                "events_total": len(events),
+                "controls_target": len(events) * controls_per_event,
+                "controls_created": controls_created,
+                "control_completion_pct": (
+                    100.0 * controls_created / (len(events) * controls_per_event)
+                    if events else 0.0
+                ),
+                "events_without_full_control_count": events_without_full,
+                "control_anchor_reuse_count": int(
+                    sum(1 for row in final_matches if int(row.get("prior_global_reuse_count") or 0) > 0)
+                ),
+                "control_rejection_reasons": dict(rejection_totals),
+                "memory_model": "one symbol frame at a time; no external-validation feature matrix built here",
+                "resume_model": "event-level Supabase checkpoints",
+            },
+        }
+

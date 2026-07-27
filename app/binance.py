@@ -31,7 +31,7 @@ class BinanceClient:
     def __init__(self, base_urls: tuple[str, ...]):
         self.base_urls = base_urls
         self.session = requests.Session()
-        self.session.headers.update({"User-Agent": "binance-8h-25pct-research/1.0"})
+        self.session.headers.update({"User-Agent": "binance-8h-25pct-research/1.3"})
 
     def _get(self, path: str, params: dict[str, Any] | None = None) -> requests.Response:
         errors: list[str] = []
@@ -95,6 +95,51 @@ class BinanceClient:
             time.sleep(0.04)
         return [row for row in rows if start_ms <= int(row[0]) < end_ms_exclusive]
 
+    def iter_aggregate_trade_pages(
+        self,
+        symbol: str,
+        start_ms: int,
+        end_ms_inclusive: int,
+        *,
+        max_pages: int = 500,
+        state: dict[str, Any] | None = None,
+    ):
+        """Yield filtered aggregate-trade pages without retaining the full window.
+
+        ``state`` is updated with page count and truncation status so callers can
+        preserve the original integrity checks while keeping memory bounded.
+        """
+        if state is None:
+            state = {}
+        state.clear()
+        state.update({"pages": 0, "truncated": False, "rows": 0})
+        params: dict[str, Any] = {
+            "symbol": symbol,
+            "startTime": start_ms,
+            "endTime": end_ms_inclusive,
+            "limit": 1000,
+        }
+        for page in range(max_pages):
+            batch = self._get("/api/v3/aggTrades", params).json()
+            state["pages"] = page + 1
+            if not batch:
+                break
+            filtered = [
+                trade for trade in batch
+                if start_ms <= int(trade["T"]) <= end_ms_inclusive
+            ]
+            if filtered:
+                state["rows"] += len(filtered)
+                yield filtered
+            last_id = int(batch[-1]["a"])
+            last_time = int(batch[-1]["T"])
+            if len(batch) < 1000 or last_time > end_ms_inclusive:
+                break
+            params = {"symbol": symbol, "fromId": last_id + 1, "limit": 1000}
+            time.sleep(0.05)
+        else:
+            state["truncated"] = True
+
     def aggregate_trades(
         self,
         symbol: str,
@@ -103,31 +148,13 @@ class BinanceClient:
         *,
         max_pages: int = 500,
     ) -> tuple[list[dict[str, Any]], bool]:
-        params: dict[str, Any] = {
-            "symbol": symbol,
-            "startTime": start_ms,
-            "endTime": end_ms_inclusive,
-            "limit": 1000,
-        }
         rows: list[dict[str, Any]] = []
-        truncated = False
-        for page in range(max_pages):
-            batch = self._get("/api/v3/aggTrades", params).json()
-            if not batch:
-                break
-            for trade in batch:
-                if start_ms <= int(trade["T"]) <= end_ms_inclusive:
-                    rows.append(trade)
-            last_id = int(batch[-1]["a"])
-            last_time = int(batch[-1]["T"])
-            if len(batch) < 1000 or last_time > end_ms_inclusive:
-                break
-            params = {"symbol": symbol, "fromId": last_id + 1, "limit": 1000}
-            time.sleep(0.05)
-        else:
-            truncated = True
-        rows = [row for row in rows if int(row["T"]) <= end_ms_inclusive]
-        return rows, truncated
+        state: dict[str, Any] = {}
+        for page in self.iter_aggregate_trade_pages(
+            symbol, start_ms, end_ms_inclusive, max_pages=max_pages, state=state
+        ):
+            rows.extend(page)
+        return rows, bool(state.get("truncated"))
 
 
 def archive_url(data_type: str, symbol: str, day: date, interval: str | None = None) -> str:
@@ -148,7 +175,7 @@ def archive_url(data_type: str, symbol: str, day: date, interval: str | None = N
 
 
 def download_archive(url: str, destination: Path) -> bool:
-    response = requests.get(url, timeout=180, stream=True, headers={"User-Agent": "binance-8h-25pct-research/1.0"})
+    response = requests.get(url, timeout=180, stream=True, headers={"User-Agent": "binance-8h-25pct-research/1.3"})
     if response.status_code == 404:
         return False
     response.raise_for_status()
@@ -163,7 +190,7 @@ def download_archive(url: str, destination: Path) -> bool:
     checksum = requests.get(
         f"{url}.CHECKSUM",
         timeout=60,
-        headers={"User-Agent": "binance-8h-25pct-research/1.0"},
+        headers={"User-Agent": "binance-8h-25pct-research/1.3"},
     )
     if checksum.status_code == 200:
         expected = checksum.text.strip().split()[0].lower()

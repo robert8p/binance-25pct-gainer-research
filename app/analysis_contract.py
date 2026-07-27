@@ -173,7 +173,7 @@ def write_analysis_contract(folder: Path, package_role: str) -> None:
     contract = dict(ROLE_CONTRACT)
     contract["package_role"] = package_role
     if "external_validation" in package_role:
-        contract["version"] = "v1_2_frozen_c2_c4_external_validation"
+        contract["version"] = "v1_3_memory_safe_resumable_external_validation"
         contract["pattern_discovery_engine"] = "ChatGPT completed discovery before this release"
         contract["application_role"] = [
             "collect the fixed non-overlapping historical cohort",

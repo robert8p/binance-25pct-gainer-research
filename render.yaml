@@ -21,7 +21,6 @@ services:
   - type: worker
     name: binance-25pct-scanner-worker
     runtime: python
-    plan: starter
     buildCommand: pip install -r requirements.txt
     startCommand: python -m app.worker
     disk:
@@ -47,3 +46,9 @@ services:
         value: https://api.binance.com,https://data-api.binance.vision
       - key: POLL_SECONDS
         value: 10
+      - key: MAX_AUTO_RESUMES
+        value: 8
+      - key: MINIMUM_DISK_FREE_BYTES
+        value: 750000000
+      - key: PERSIST_EVENT_AGG_TRADES
+        value: false

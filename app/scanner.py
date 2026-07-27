@@ -1,7 +1,13 @@
 from __future__ import annotations
 
+import hashlib
+import json
+import logging
+import os
+import tempfile
 import uuid
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 from .binance import BinanceClient
@@ -12,7 +18,10 @@ from .classifier import (
     parse_kline,
     pct_change,
 )
+from .runtime import collect_memory, ensure_disk_headroom, log_resources
 from .supabase import SupabaseClient
+
+logger = logging.getLogger(__name__)
 
 
 def utc_ms(dt: datetime) -> int:
@@ -28,9 +37,101 @@ def _iso_from_ms(value: int) -> str:
 
 
 class Scanner:
-    def __init__(self, db: SupabaseClient, binance: BinanceClient):
+    def __init__(
+        self,
+        db: SupabaseClient,
+        binance: BinanceClient,
+        temp_root: Path,
+        *,
+        persist_event_agg_trades: bool = False,
+        minimum_disk_free_bytes: int = 750_000_000,
+    ):
         self.db = db
         self.binance = binance
+        self.temp_root = temp_root
+        self.persist_event_agg_trades = persist_event_agg_trades
+        self.minimum_disk_free_bytes = minimum_disk_free_bytes
+
+    def _symbol_universe(self, scan_id: str, quote_assets: list[str]) -> list[dict[str, Any]]:
+        existing = self.db.select_all(
+            "binance_symbol_snapshots",
+            filters={"scan_id": f"eq.{scan_id}", "selected_canonical": "eq.true"},
+            order="symbol.asc",
+        )
+        if existing:
+            return [
+                {
+                    "symbol": row["symbol"],
+                    "base_asset": row["base_asset"],
+                    "quote_asset": row["quote_asset"],
+                    "quote_priority": int(row.get("quote_priority") or 0),
+                    "status": row.get("status") or "TRADING",
+                    "spot_permission": bool(row.get("spot_permission", True)),
+                    "is_spot_trading_allowed": bool(row.get("is_spot_trading_allowed", True)),
+                    "stablecoin_like": bool(row.get("stablecoin_like", False)),
+                    "leveraged_token_like": bool(row.get("leveraged_token_like", False)),
+                    "raw_json": row.get("raw_json") or {},
+                }
+                for row in existing
+            ]
+
+        exchange = self.binance.exchange_info()
+        snapshot_at = datetime.now(timezone.utc).isoformat()
+        candidates: list[dict[str, Any]] = []
+        quote_rank = {quote: rank for rank, quote in enumerate(quote_assets)}
+        for raw in exchange.get("symbols", []):
+            item = classify_symbol(raw)
+            if item["quote_asset"] not in quote_rank:
+                continue
+            if item["status"] != "TRADING" or not item["spot_permission"] or not item["is_spot_trading_allowed"]:
+                continue
+            if "LIMIT" not in item["order_types"]:
+                continue
+            item["snapshot_at"] = snapshot_at
+            item["scan_id"] = scan_id
+            item["quote_priority"] = quote_rank[item["quote_asset"]]
+            candidates.append(item)
+
+        chosen_by_base: dict[str, dict[str, Any]] = {}
+        for item in candidates:
+            current = chosen_by_base.get(item["base_asset"])
+            if current is None or (item["quote_priority"], item["symbol"]) < (
+                current["quote_priority"], current["symbol"]
+            ):
+                chosen_by_base[item["base_asset"]] = item
+        symbols = sorted(chosen_by_base.values(), key=lambda row: row["symbol"])
+        selected_symbols = {row["symbol"] for row in symbols}
+        self.db.upsert(
+            "binance_symbol_snapshots",
+            [
+                {
+                    "scan_id": scan_id,
+                    "snapshot_at": snapshot_at,
+                    "symbol": item["symbol"],
+                    "base_asset": item["base_asset"],
+                    "quote_asset": item["quote_asset"],
+                    "quote_priority": item["quote_priority"],
+                    "selected_canonical": item["symbol"] in selected_symbols,
+                    "status": item["status"],
+                    "spot_permission": item["spot_permission"],
+                    "is_spot_trading_allowed": item["is_spot_trading_allowed"],
+                    "stablecoin_like": item["stablecoin_like"],
+                    "leveraged_token_like": item["leveraged_token_like"],
+                    "raw_json": item["raw_json"],
+                }
+                for item in candidates
+            ],
+            on_conflict="scan_id,symbol",
+        )
+        return symbols
+
+    @staticmethod
+    def _universe_hash(symbols: list[dict[str, Any]]) -> str:
+        payload = [
+            (row["symbol"], row["base_asset"], row["quote_asset"], row.get("quote_priority", 0))
+            for row in symbols
+        ]
+        return hashlib.sha256(json.dumps(payload, separators=(",", ":")).encode("utf-8")).hexdigest()
 
     def run(self, job: dict[str, Any]) -> dict[str, Any]:
         job_id = str(job["id"])
@@ -71,66 +172,59 @@ class Scanner:
         # Load one extra daily bar so the first candidate date can reference the prior day.
         start = candidate_start - timedelta(days=1)
 
-        exchange = self.binance.exchange_info()
-        snapshot_at = datetime.now(timezone.utc).isoformat()
-        raw_symbols = exchange.get("symbols", [])
-        candidates: list[dict[str, Any]] = []
-        quote_rank = {quote: rank for rank, quote in enumerate(quote_assets)}
-        for raw in raw_symbols:
-            item = classify_symbol(raw)
-            if item["quote_asset"] not in quote_rank:
-                continue
-            if item["status"] != "TRADING" or not item["spot_permission"] or not item["is_spot_trading_allowed"]:
-                continue
-            if "LIMIT" not in item["order_types"]:
-                continue
-            item["snapshot_at"] = snapshot_at
-            item["scan_id"] = job_id
-            item["quote_priority"] = quote_rank[item["quote_asset"]]
-            candidates.append(item)
+        symbols = self._symbol_universe(job_id, quote_assets)
+        universe_hash = self._universe_hash(symbols)
+        checkpoint = dict(job.get("checkpoint_json") or {})
+        resume_index = int(checkpoint.get("next_symbol_index", job.get("symbols_processed") or 0))
+        resume_index = min(max(resume_index, 0), len(symbols))
+        stored_hash = checkpoint.get("symbol_universe_sha256")
+        if stored_hash and stored_hash != universe_hash:
+            raise RuntimeError("The frozen scan symbol universe changed; refusing an unsafe resume")
 
-        # One canonical pair per base asset prevents duplicate coin events across
-        # USDT/USDC/FDUSD. Quote order is the preference order.
-        chosen_by_base: dict[str, dict[str, Any]] = {}
-        for item in candidates:
-            current = chosen_by_base.get(item["base_asset"])
-            if current is None or (item["quote_priority"], item["symbol"]) < (
-                current["quote_priority"], current["symbol"]
-            ):
-                chosen_by_base[item["base_asset"]] = item
-        symbols = sorted(chosen_by_base.values(), key=lambda row: row["symbol"])
-        selected_symbols = {row["symbol"] for row in symbols}
-
-        self.db.upsert(
-            "binance_symbol_snapshots",
-            [
-                {
-                    "scan_id": job_id,
-                    "snapshot_at": snapshot_at,
-                    "symbol": s["symbol"],
-                    "base_asset": s["base_asset"],
-                    "quote_asset": s["quote_asset"],
-                    "quote_priority": s["quote_priority"],
-                    "selected_canonical": s["symbol"] in selected_symbols,
-                    "status": s["status"],
-                    "spot_permission": s["spot_permission"],
-                    "is_spot_trading_allowed": s["is_spot_trading_allowed"],
-                    "stablecoin_like": s["stablecoin_like"],
-                    "leveraged_token_like": s["leveraged_token_like"],
-                    "raw_json": s["raw_json"],
-                }
-                for s in candidates
-            ],
-            on_conflict="scan_id,symbol",
+        existing_events = self.db.select_all(
+            "binance_gainer_events",
+            columns="id,sellability_pass",
+            filters={"scan_id": f"eq.{job_id}"},
         )
-        self.db.update("binance_scan_jobs", {"id": f"eq.{job_id}"}, {"symbols_total": len(symbols)})
+        existing_event_ids = {str(row["id"]) for row in existing_events}
+        saleable_events = sum(bool(row.get("sellability_pass")) for row in existing_events)
+        surge_candidates = len(existing_events)
+        failures = int(checkpoint.get("failures", job.get("failures") or 0))
+        daily_rows_written = int(checkpoint.get("daily_rows", job.get("daily_rows") or 0))
 
-        saleable_events = 0
-        surge_candidates = 0
-        failures = 0
-        daily_rows_written = 0
+        checkpoint.update(
+            {
+                "schema_version": 1,
+                "phase": "scan_symbols",
+                "next_symbol_index": resume_index,
+                "symbol_universe_sha256": universe_hash,
+                "symbols_total": len(symbols),
+                "candidates_found": surge_candidates,
+                "events_found": saleable_events,
+                "failures": failures,
+                "daily_rows": daily_rows_written,
+            }
+        )
+        self.db.update(
+            "binance_scan_jobs",
+            {"id": f"eq.{job_id}"},
+            {
+                "symbols_total": len(symbols),
+                "symbols_processed": resume_index,
+                "candidates_found": surge_candidates,
+                "events_found": saleable_events,
+                "failures": failures,
+                "daily_rows": daily_rows_written,
+                "checkpoint_json": checkpoint,
+                "last_stage": "scan_symbols",
+                "last_unit": symbols[resume_index - 1]["symbol"] if resume_index else None,
+                "last_checkpoint_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+        log_resources("scan_resume", path=self.temp_root, extra={"resume_index": resume_index, "symbols_total": len(symbols)})
+
         factor = 1.0 + threshold_pct / 100.0
-        for index, symbol_info in enumerate(symbols, start=1):
+        for index, symbol_info in enumerate(symbols[resume_index:], start=resume_index + 1):
             symbol = symbol_info["symbol"]
             try:
                 raw_daily = self.binance.klines(symbol, "1d", utc_ms(start), utc_ms(end))
@@ -181,7 +275,8 @@ class Scanner:
                         min_exit,
                         confirmation_seconds,
                     )
-                    if outcome is not None:
+                    if outcome is not None and outcome["event_id"] not in existing_event_ids:
+                        existing_event_ids.add(outcome["event_id"])
                         surge_candidates += 1
                         if outcome["sellability_pass"]:
                             saleable_events += 1
@@ -196,6 +291,18 @@ class Scanner:
                         "message": str(exc)[:4000],
                     },
                 )
+            checkpoint.update(
+                {
+                    "phase": "scan_symbols",
+                    "next_symbol_index": index,
+                    "last_symbol": symbol,
+                    "candidates_found": surge_candidates,
+                    "events_found": saleable_events,
+                    "failures": failures,
+                    "daily_rows": daily_rows_written,
+                }
+            )
+            now_iso = datetime.now(timezone.utc).isoformat()
             self.db.update(
                 "binance_scan_jobs",
                 {"id": f"eq.{job_id}"},
@@ -205,10 +312,28 @@ class Scanner:
                     "events_found": saleable_events,
                     "failures": failures,
                     "daily_rows": daily_rows_written,
-                    "heartbeat_at": datetime.now(timezone.utc).isoformat(),
+                    "heartbeat_at": now_iso,
+                    "checkpoint_json": checkpoint,
+                    "last_stage": "scan_symbols",
+                    "last_unit": symbol,
+                    "last_checkpoint_at": now_iso,
                 },
             )
+            collect_memory()
+            if index % 10 == 0 or index == len(symbols):
+                log_resources("scan_symbol_checkpoint", path=self.temp_root, extra={"symbol": symbol, "processed": index})
 
+        checkpoint.update({"phase": "complete", "next_symbol_index": len(symbols)})
+        self.db.update(
+            "binance_scan_jobs",
+            {"id": f"eq.{job_id}"},
+            {
+                "checkpoint_json": checkpoint,
+                "last_stage": "complete",
+                "last_unit": symbols[-1]["symbol"] if symbols else None,
+                "last_checkpoint_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
         return {
             "event_definition_version": event_definition_version,
             "symbols_total": len(symbols),
@@ -291,43 +416,36 @@ class Scanner:
             )
         )
 
-        # Resolve the minute low to an executed aggregate trade. The latest trade
-        # at the low gives the most conservative elapsed-time proof.
+        # Resolve aggregate trades page-by-page. This avoids retaining hundreds
+        # of thousands of hot-market trades in RAM.
         baseline_start_ms = utc_ms(baseline_dt)
-        baseline_trades, baseline_page_truncated = self.binance.aggregate_trades(
-            symbol, baseline_start_ms, baseline_start_ms + 59_999
-        )
         price_tolerance = max(abs(baseline_price) * 1e-12, 1e-15)
-        baseline_matches = [
-            trade for trade in baseline_trades
-            if abs(float(trade["p"]) - baseline_price) <= price_tolerance
-        ]
-        baseline_trade = max(baseline_matches, key=lambda trade: int(trade["T"]), default=None)
+        baseline_trade = None
+        baseline_state: dict[str, Any] = {}
+        for page in self.binance.iter_aggregate_trade_pages(
+            symbol, baseline_start_ms, baseline_start_ms + 59_999, state=baseline_state
+        ):
+            for trade in page:
+                if abs(float(trade["p"]) - baseline_price) <= price_tolerance:
+                    if baseline_trade is None or int(trade["T"]) > int(baseline_trade["T"]):
+                        baseline_trade = trade
         exact_baseline_ms = int(baseline_trade["T"]) if baseline_trade else None
 
         minute_start_ms = utc_ms(crossing_dt)
-        crossing_minute_trades, crossing_page_truncated = self.binance.aggregate_trades(
-            symbol, minute_start_ms, minute_start_ms + 59_999
-        )
-        first_cross_trade = next(
-            (trade for trade in crossing_minute_trades if float(trade["p"]) + price_tolerance >= threshold),
-            None,
-        )
-
-        # The exact crossing must be resolved inside the kline crossing minute.
-        # A later recross is not substituted because the user explicitly does
-        # not require the price to remain above the threshold.
-        sell_page_truncated = False
-        if first_cross_trade is None:
-            exact_cross_ms = None
-            trades: list[dict[str, Any]] = []
-        else:
-            exact_cross_ms = int(first_cross_trade["T"])
-            sell_end = exact_cross_ms + confirmation_seconds * 1000
-            trades, sell_page_truncated = self.binance.aggregate_trades(
-                symbol, exact_cross_ms, sell_end
+        first_cross_trade = None
+        crossing_state: dict[str, Any] = {}
+        for page in self.binance.iter_aggregate_trade_pages(
+            symbol, minute_start_ms, minute_start_ms + 59_999, state=crossing_state
+        ):
+            first_cross_trade = next(
+                (trade for trade in page if float(trade["p"]) + price_tolerance >= threshold),
+                None,
             )
+            if first_cross_trade is not None:
+                break
 
+        sell_state: dict[str, Any] = {"truncated": False}
+        exact_cross_ms = int(first_cross_trade["T"]) if first_cross_trade else None
         exact_elapsed_seconds = (
             (exact_cross_ms - exact_baseline_ms) / 1000
             if exact_cross_ms is not None and exact_baseline_ms is not None
@@ -338,8 +456,7 @@ class Scanner:
             and 0 < exact_elapsed_seconds <= window_minutes * 60
         )
 
-        trades_truncated = baseline_page_truncated or crossing_page_truncated or sell_page_truncated
-        normalized_trades: list[dict[str, Any]] = []
+        trades_truncated = bool(baseline_state.get("truncated")) or bool(crossing_state.get("truncated"))
         seller_notional_any_price = 0.0
         seller_base_quantity_any_price = 0.0
         seller_notional_at_or_above = 0.0
@@ -352,54 +469,74 @@ class Scanner:
         lowest_seller_exit_price: float | None = None
         highest_seller_exit_price: float | None = None
 
-        for trade in trades:
-            price = float(trade["p"])
-            qty = float(trade["q"])
-            notional = price * qty
-            at_threshold = price + price_tolerance >= threshold
-            seller_taker = bool(trade["m"])
-            if at_threshold:
-                all_trade_notional_at_or_above += notional
-            if seller_taker:
-                previous_seller_notional = seller_notional_any_price
-                seller_notional_any_price += notional
-                seller_base_quantity_any_price += qty
-                if at_threshold:
-                    seller_notional_at_or_above += notional
-                ts = _iso_from_ms(int(trade["T"]))
-                if first_seller_exit_at is None:
-                    first_seller_exit_at = ts
-                lowest_seller_exit_price = price if lowest_seller_exit_price is None else min(lowest_seller_exit_price, price)
-                highest_seller_exit_price = price if highest_seller_exit_price is None else max(highest_seller_exit_price, price)
+        trade_spool: Path | None = None
+        spool_handle = None
+        if self.persist_event_agg_trades and exact_cross_ms is not None:
+            ensure_disk_headroom(self.temp_root, self.minimum_disk_free_bytes)
+            spool_dir = self.temp_root / "scan-trade-spool"
+            spool_dir.mkdir(parents=True, exist_ok=True)
+            fd, name = tempfile.mkstemp(prefix=f"{event_id}-", suffix=".jsonl", dir=spool_dir)
+            os.close(fd)
+            trade_spool = Path(name)
+            spool_handle = trade_spool.open("w", encoding="utf-8")
 
-                # Compute the executable VWAP for the first min_exit quote units,
-                # partially using the final aggregate trade when necessary.
-                if cumulative_hit_at is None and min_exit > 0:
-                    remaining = max(0.0, min_exit - previous_seller_notional)
-                    used_notional = min(remaining, notional)
-                    if used_notional > 0 and price > 0:
-                        exit_base_for_min_notional += used_notional / price
-                    if seller_notional_any_price + 1e-12 >= min_exit:
-                        cumulative_hit_at = ts
-                        cumulative_hit_price = price
-                        if exit_base_for_min_notional > 0:
-                            exit_vwap = min_exit / exit_base_for_min_notional
+        if exact_cross_ms is not None:
+            sell_end = exact_cross_ms + confirmation_seconds * 1000
+            for page in self.binance.iter_aggregate_trade_pages(
+                symbol, exact_cross_ms, sell_end, state=sell_state
+            ):
+                for trade in page:
+                    price = float(trade["p"])
+                    qty = float(trade["q"])
+                    notional = price * qty
+                    at_threshold = price + price_tolerance >= threshold
+                    seller_taker = bool(trade["m"])
+                    if at_threshold:
+                        all_trade_notional_at_or_above += notional
+                    if seller_taker:
+                        previous_seller_notional = seller_notional_any_price
+                        seller_notional_any_price += notional
+                        seller_base_quantity_any_price += qty
+                        if at_threshold:
+                            seller_notional_at_or_above += notional
+                        ts = _iso_from_ms(int(trade["T"]))
+                        if first_seller_exit_at is None:
+                            first_seller_exit_at = ts
+                        lowest_seller_exit_price = price if lowest_seller_exit_price is None else min(lowest_seller_exit_price, price)
+                        highest_seller_exit_price = price if highest_seller_exit_price is None else max(highest_seller_exit_price, price)
+                        if cumulative_hit_at is None and min_exit > 0:
+                            remaining = max(0.0, min_exit - previous_seller_notional)
+                            used_notional = min(remaining, notional)
+                            if used_notional > 0 and price > 0:
+                                exit_base_for_min_notional += used_notional / price
+                            if seller_notional_any_price + 1e-12 >= min_exit:
+                                cumulative_hit_at = ts
+                                cumulative_hit_price = price
+                                if exit_base_for_min_notional > 0:
+                                    exit_vwap = min_exit / exit_base_for_min_notional
 
-            normalized_trades.append(
-                {
-                    "event_id": event_id,
-                    "scan_id": scan_id,
-                    "symbol": symbol,
-                    "event_date": day_start.date().isoformat(),
-                    "agg_trade_id": int(trade["a"]),
-                    "trade_time": _iso_from_ms(int(trade["T"])),
-                    "price": price,
-                    "quantity": qty,
-                    "quote_notional": notional,
-                    "buyer_was_maker": seller_taker,
-                    "at_or_above_threshold": at_threshold,
-                }
-            )
+                    if spool_handle is not None:
+                        spool_handle.write(
+                            json.dumps(
+                                {
+                                    "event_id": event_id,
+                                    "scan_id": scan_id,
+                                    "symbol": symbol,
+                                    "event_date": day_start.date().isoformat(),
+                                    "agg_trade_id": int(trade["a"]),
+                                    "trade_time": _iso_from_ms(int(trade["T"])),
+                                    "price": price,
+                                    "quantity": qty,
+                                    "quote_notional": notional,
+                                    "buyer_was_maker": seller_taker,
+                                    "at_or_above_threshold": at_threshold,
+                                },
+                                separators=(",", ":"),
+                            ) + "\n"
+                        )
+        if spool_handle is not None:
+            spool_handle.close()
+        trades_truncated = trades_truncated or bool(sell_state.get("truncated"))
 
         sellability_pass = (
             baseline_trade is not None
@@ -500,11 +637,21 @@ class Scanner:
             minutes,
             on_conflict="event_id,open_time",
         )
-        self.db.upsert(
-            "binance_event_agg_trades",
-            normalized_trades,
-            on_conflict="event_id,agg_trade_id",
-        )
+        if trade_spool is not None and trade_spool.exists():
+            batch: list[dict[str, Any]] = []
+            with trade_spool.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    batch.append(json.loads(line))
+                    if len(batch) >= 500:
+                        self.db.upsert(
+                            "binance_event_agg_trades", batch, on_conflict="event_id,agg_trade_id"
+                        )
+                        batch.clear()
+                if batch:
+                    self.db.upsert(
+                        "binance_event_agg_trades", batch, on_conflict="event_id,agg_trade_id"
+                    )
+            trade_spool.unlink(missing_ok=True)
         observations = decision_observations(day_minutes, day_start.date().isoformat())
         for observation in observations:
             observation.update({"event_id": event_id, "scan_id": scan_id, "symbol": symbol})
@@ -513,4 +660,4 @@ class Scanner:
             observations,
             on_conflict="event_id,decision_label",
         )
-        return {"candidate_recorded": True, "sellability_pass": sellability_pass}
+        return {"event_id": event_id, "candidate_recorded": True, "sellability_pass": sellability_pass}

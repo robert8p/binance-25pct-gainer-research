@@ -19,14 +19,14 @@ from .frozen_candidates import (
 )
 from .supabase import SupabaseClient
 
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.3.0"
 EVENT_DEFINITION_VERSION = "v1_25pct_rolling_8h"
 FIXED_THRESHOLD_PCT = 25.0
 FIXED_WINDOW_MINUTES = 480
 
 settings = Settings.from_env()
 db = SupabaseClient(settings.supabase_url, settings.supabase_service_role_key, settings.storage_bucket)
-app = FastAPI(title="Binance 25% Frozen C2/C4 External Validation", version=APP_VERSION)
+app = FastAPI(title="Binance 25% Memory-Safe Resumable External Validation", version=APP_VERSION)
 templates = Jinja2Templates(directory="app/templates")
 
 
@@ -69,6 +69,7 @@ def health() -> dict[str, str]:
         "target": "25pct_within_8h",
         "event_definition_version": EVENT_DEFINITION_VERSION,
         "purpose": "frozen_c2_c4_external_validation",
+        "execution_model": "memory_bounded_resumable",
         "candidate_register_sha256": register_sha256(),
     }
 
@@ -139,7 +140,7 @@ def create_scan(
     window_end_date_exclusive: str = Form(""),
 ) -> RedirectResponse:
     _auth(request)
-    raise HTTPException(410, "This V1.2 release accepts only the locked external-validation workflow")
+    raise HTTPException(410, "This V1.3 release accepts only the locked external-validation workflow")
     if not 1 <= lookback_days <= 180:
         raise HTTPException(400, "lookback_days must be between 1 and 180")
     if min_exit_notional < 0:
@@ -280,7 +281,7 @@ def create_external_validation(
     if not matched or matched[0].get("status") not in {"completed", "completed_with_warnings"}:
         raise HTTPException(400, "Select a completed external-validation matched-control job")
     if matched[0].get("research_purpose") != "external_validation_c2_c4":
-        raise HTTPException(400, "The selected job is not the V1.2 external-validation cohort")
+        raise HTTPException(400, "The selected job is not the V1.3 external-validation cohort")
     existing = db.select(
         "binance_external_validation_jobs",
         filters={
@@ -316,7 +317,7 @@ def create_research(
     include_raw_trades: bool = Form(False),
 ) -> RedirectResponse:
     _auth(request)
-    raise HTTPException(410, "This V1.2 release accepts only the locked external-validation workflow")
+    raise HTTPException(410, "This V1.3 release accepts only the locked external-validation workflow")
     if not 1 <= prior_days <= 30:
         raise HTTPException(400, "prior_days must be between 1 and 30")
     db.insert(
@@ -345,7 +346,7 @@ def create_matched_controls(
     min_entry_notional: float = Form(500),
 ) -> RedirectResponse:
     _auth(request)
-    raise HTTPException(410, "This V1.2 release accepts only the locked external-validation workflow")
+    raise HTTPException(410, "This V1.3 release accepts only the locked external-validation workflow")
     if not 1 <= controls_per_event <= 10:
         raise HTTPException(400, "controls_per_event must be between 1 and 10")
     if not 1 <= prior_days <= 30:
@@ -394,7 +395,7 @@ def create_ten_day_context(
     min_entry_notional: float = Form(500),
 ) -> RedirectResponse:
     _auth(request)
-    raise HTTPException(410, "This V1.2 release accepts only the locked external-validation workflow")
+    raise HTTPException(410, "This V1.3 release accepts only the locked external-validation workflow")
     if research_mode not in {"exploratory_reuse", "fresh_staged"}:
         raise HTTPException(400, "Invalid research mode")
     try:
@@ -429,7 +430,7 @@ def create_baseline_context(
     min_entry_notional: float = Form(500),
 ) -> RedirectResponse:
     _auth(request)
-    raise HTTPException(410, "This V1.2 release accepts only the locked external-validation workflow")
+    raise HTTPException(410, "This V1.3 release accepts only the locked external-validation workflow")
     if research_mode not in {"exploratory_reuse", "fresh_staged"}:
         raise HTTPException(400, "Invalid research mode")
     if min_entry_notional < 0:
@@ -449,6 +450,44 @@ def create_baseline_context(
     )
     return RedirectResponse("/", status_code=303)
 
+
+
+@app.post("/resume-job")
+def resume_job(
+    request: Request,
+    job_type: str = Form(...),
+    job_id: str = Form(...),
+) -> RedirectResponse:
+    _auth(request)
+    table_map = {
+        "scan": "binance_scan_jobs",
+        "matched": "binance_matched_control_jobs",
+        "evaluation": "binance_external_validation_jobs",
+    }
+    table = table_map.get(job_type)
+    if table is None:
+        raise HTTPException(400, "Unsupported job type")
+    rows = db.select(table, filters={"id": f"eq.{job_id}"}, limit=1)
+    if not rows:
+        raise HTTPException(404, "Job not found")
+    row = rows[0]
+    if row.get("status") not in {"failed", "queued"}:
+        raise HTTPException(409, "Only failed or queued jobs can be resumed")
+    if table in {"binance_scan_jobs", "binance_matched_control_jobs"}:
+        if row.get("research_purpose") != "external_validation_c2_c4":
+            raise HTTPException(400, "This release resumes only external-validation jobs")
+    db.update(
+        table,
+        {"id": f"eq.{job_id}"},
+        {
+            "status": "queued",
+            "completed_at": None,
+            "heartbeat_at": None,
+            "last_stage": "manual_resume_requested",
+            "error_message": "Manual resume requested; durable checkpoint retained",
+        },
+    )
+    return RedirectResponse("/", status_code=303)
 
 def _csv_response(rows: list[dict[str, Any]], filename: str) -> StreamingResponse:
     output = io.StringIO()

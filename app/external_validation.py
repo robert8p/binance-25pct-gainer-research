@@ -34,6 +34,7 @@ from .frozen_candidates import (
 )
 from .matched_controls import MinuteArchiveCache, parse_datetime
 from .package_utils import build_grouped_zip_parts
+from .runtime import collect_memory, ensure_disk_headroom, log_resources
 from .supabase import SupabaseClient
 
 RNG_SEED = 20260726
@@ -322,15 +323,23 @@ def _report_markdown(overall: dict[str, Any]) -> str:
 
 
 class ExternalValidationBuilder:
-    def __init__(self, db: SupabaseClient, binance: BinanceClient, temp_root: Path):
+    def __init__(
+        self,
+        db: SupabaseClient,
+        binance: BinanceClient,
+        temp_root: Path,
+        *,
+        minimum_disk_free_bytes: int = 750_000_000,
+    ):
         self.db = db
         self.binance = binance
         self.temp_root = temp_root
+        self.minimum_disk_free_bytes = minimum_disk_free_bytes
         self.cache = MinuteArchiveCache(binance, temp_root)
 
     def _validate_source(self, matched_job: dict[str, Any]) -> dict[str, Any]:
         if str(matched_job.get("research_purpose") or "") != "external_validation_c2_c4":
-            raise ValueError("Select a V1.2 external-validation matched-control job")
+            raise ValueError("Select a V1.3 external-validation matched-control job")
         if int(matched_job.get("controls_per_event") or 0) != 5:
             raise ValueError("External validation requires exactly five requested controls per event")
         if int(matched_job.get("prior_days") or 0) != 10:
@@ -379,6 +388,25 @@ class ExternalValidationBuilder:
             samples.append(sample)
         return samples
 
+    def _persist_manifest(self, job_id: str, rows: list[dict[str, Any]]) -> None:
+        if not rows:
+            return
+        payload = []
+        for row in rows:
+            payload.append(
+                {
+                    "external_validation_job_id": job_id,
+                    "symbol": str(row.get("symbol") or ""),
+                    "source_date": str(row.get("date") or "1970-01-01"),
+                    "manifest_json": row,
+                }
+            )
+        self.db.upsert(
+            "binance_external_validation_source_manifest",
+            payload,
+            on_conflict="external_validation_job_id,symbol,source_date",
+        )
+
     def run(self, job: dict[str, Any]) -> dict[str, Any]:
         job_id = str(job["id"])
         matched_job_id = str(job["matched_control_job_id"])
@@ -398,6 +426,22 @@ class ExternalValidationBuilder:
         crosses = [parse_datetime(sample["cross_anchor_time"]) for sample in samples]
         load_start = min(crosses).date() - timedelta(days=13)
         load_end = max(crosses).date() + timedelta(days=1)
+        existing_rows = self.db.select_all(
+            "binance_external_validation_feature_rows",
+            filters={"external_validation_job_id": f"eq.{job_id}"},
+            order="symbol.asc,sample_id.asc",
+        )
+        completed_sample_ids = {str(row["sample_id"]) for row in existing_rows}
+        checkpoint = dict(job.get("checkpoint_json") or {})
+        checkpoint.update(
+            {
+                "schema_version": 1,
+                "phase": "feature_generation",
+                "samples_total": len(samples),
+                "samples_completed": len(completed_sample_ids),
+            }
+        )
+        now_iso = datetime.now(timezone.utc).isoformat()
         self.db.update(
             "binance_external_validation_jobs",
             {"id": f"eq.{job_id}"},
@@ -405,141 +449,227 @@ class ExternalValidationBuilder:
                 "samples_total": len(samples),
                 "events_total": sum(sample["label"] == 1 for sample in samples),
                 "controls_total": sum(sample["label"] == 0 for sample in samples),
-                "heartbeat_at": datetime.now(timezone.utc).isoformat(),
+                "samples_processed": len(completed_sample_ids),
+                "feature_rows": len(completed_sample_ids),
+                "heartbeat_at": now_iso,
+                "checkpoint_json": checkpoint,
+                "last_stage": "feature_generation",
+                "last_checkpoint_at": now_iso,
             },
         )
+        log_resources(
+            "external_validation_resume",
+            path=self.temp_root,
+            extra={"samples_completed": len(completed_sample_ids), "samples_total": len(samples)},
+        )
 
-        work = Path(tempfile.mkdtemp(prefix=f"external-validation-{job_id}-", dir=self.temp_root))
-        feature_rows: list[dict[str, Any]] = []
-        audit_rows: list[dict[str, Any]] = []
-        source_manifest: list[dict[str, Any]] = []
-        failures = 0
-        samples_failed = 0
-        try:
-            reference_frames: dict[str, pd.DataFrame] = {}
-            for symbol in REFERENCE_SYMBOLS:
-                try:
-                    loaded = self.cache.load_symbol(symbol, load_start, load_end)
-                    source_manifest.extend(loaded.source_manifest)
-                    reference_frames[symbol] = loaded.frame[["close", "observed"]].copy()
-                except Exception as exc:
-                    failures += 1
-                    self.db.insert(
-                        "binance_external_validation_issues",
-                        {
-                            "external_validation_job_id": job_id,
-                            "symbol": symbol,
-                            "stage": "load_reference",
-                            "message": str(exc)[:4000],
-                        },
-                    )
+        reference_frames: dict[str, pd.DataFrame] = {}
+        for symbol in REFERENCE_SYMBOLS:
+            ensure_disk_headroom(self.temp_root, self.minimum_disk_free_bytes)
+            loaded = self.cache.load_symbol(
+                symbol,
+                load_start,
+                load_end,
+                required_columns=("close",),
+            )
+            self._persist_manifest(job_id, loaded.source_manifest)
+            reference_frames[symbol] = loaded.frame[["close", "observed"]].copy()
+            del loaded
+            collect_memory()
 
-            by_symbol: dict[str, list[dict[str, Any]]] = defaultdict(list)
-            for sample in samples:
+        by_symbol: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for sample in samples:
+            if str(sample["sample_id"]) not in completed_sample_ids:
                 by_symbol[str(sample["symbol"])].append(sample)
-            processed = 0
-            for symbol, symbol_samples in sorted(by_symbol.items()):
-                try:
-                    loaded = self.cache.load_symbol(symbol, load_start, load_end)
-                    frame = loaded.frame
-                    source_manifest.extend(loaded.source_manifest)
-                except Exception as exc:
-                    failures += 1
-                    samples_failed += len(symbol_samples)
-                    self.db.insert(
-                        "binance_external_validation_issues",
-                        {
-                            "external_validation_job_id": job_id,
-                            "symbol": symbol,
-                            "stage": "load_symbol",
-                            "message": str(exc)[:4000],
-                        },
-                    )
-                    continue
 
+        processed = len(completed_sample_ids)
+        for symbol, symbol_samples in sorted(by_symbol.items()):
+            ensure_disk_headroom(self.temp_root, self.minimum_disk_free_bytes)
+            loaded = None
+            frame = None
+            try:
+                loaded = self.cache.load_symbol(
+                    symbol,
+                    load_start,
+                    load_end,
+                    required_columns=(
+                        "open",
+                        "high",
+                        "low",
+                        "close",
+                        "quote_volume",
+                        "trade_count",
+                        "taker_buy_quote_volume",
+                    ),
+                )
+                frame = loaded.frame
+                self._persist_manifest(job_id, loaded.source_manifest)
+                feature_payload: list[dict[str, Any]] = []
                 for sample in symbol_samples:
                     audit = pseudo_window_audit(frame, sample)
-                    audit_rows.append(
+                    audit_row = {
+                        "sample_id": sample["sample_id"],
+                        "match_group_id": sample["match_group_id"],
+                        "sample_type": sample["sample_type"],
+                        "symbol": sample["symbol"],
+                        "baseline_anchor_time": sample["baseline_anchor_time"],
+                        "cross_anchor_time": sample["cross_anchor_time"],
+                        **audit,
+                    }
+                    feature = compute_pre_cross_feature_row(
+                        frame,
+                        sample=sample,
+                        horizon_minutes=DECISION_HORIZON_MINUTES,
+                        prior_days=10,
+                        min_entry_notional=500.0,
+                        reference_frames=reference_frames,
+                        audit=audit,
+                    )
+                    feature_payload.append(
                         {
-                            "sample_id": sample["sample_id"],
-                            "match_group_id": sample["match_group_id"],
-                            "sample_type": sample["sample_type"],
-                            "symbol": sample["symbol"],
-                            "baseline_anchor_time": sample["baseline_anchor_time"],
-                            "cross_anchor_time": sample["cross_anchor_time"],
-                            **audit,
+                            "external_validation_job_id": job_id,
+                            "sample_id": str(sample["sample_id"]),
+                            "match_group_id": str(sample["match_group_id"]),
+                            "sample_type": str(sample["sample_type"]),
+                            "label": int(sample["label"]),
+                            "symbol": symbol,
+                            "feature_json": {key: _json_ready(value) for key, value in feature.items()},
+                            "audit_json": {key: _json_ready(value) for key, value in audit_row.items()},
                         }
                     )
-                    feature_rows.append(
-                        compute_pre_cross_feature_row(
-                            frame,
-                            sample=sample,
-                            horizon_minutes=DECISION_HORIZON_MINUTES,
-                            prior_days=10,
-                            min_entry_notional=500.0,
-                            reference_frames=reference_frames,
-                            audit=audit,
-                        )
-                    )
-                processed += len(symbol_samples)
+                self.db.upsert(
+                    "binance_external_validation_feature_rows",
+                    feature_payload,
+                    on_conflict="external_validation_job_id,sample_id",
+                    chunk_size=100,
+                )
+                processed += len(feature_payload)
+                completed_sample_ids.update(str(row["sample_id"]) for row in feature_payload)
+                checkpoint.update(
+                    {
+                        "phase": "feature_generation",
+                        "last_symbol": symbol,
+                        "samples_completed": processed,
+                    }
+                )
+                now_iso = datetime.now(timezone.utc).isoformat()
                 self.db.update(
                     "binance_external_validation_jobs",
                     {"id": f"eq.{job_id}"},
                     {
                         "samples_processed": processed,
-                        "feature_rows": len(feature_rows),
-                        "failures": failures,
-                        "heartbeat_at": datetime.now(timezone.utc).isoformat(),
+                        "feature_rows": processed,
+                        "heartbeat_at": now_iso,
+                        "checkpoint_json": checkpoint,
+                        "last_stage": "feature_generation",
+                        "last_unit": symbol,
+                        "last_checkpoint_at": now_iso,
                     },
                 )
-                del frame
-
-            feature_df = pd.DataFrame(feature_rows)
-            audit_df = pd.DataFrame(audit_rows)
-            if feature_df.empty:
-                raise RuntimeError("No external-validation feature rows were produced")
-            feature_df["pseudo_window_contaminated_control"] = feature_df[
-                "pseudo_window_contaminated_control"
-            ].fillna(False).astype(bool)
-            eligible = feature_df[
-                (feature_df["feature_quality_status"] == "pass")
-                & ~(
-                    (feature_df["label"] == 0)
-                    & feature_df["pseudo_window_contaminated_control"]
+            except Exception as exc:
+                self.db.insert(
+                    "binance_external_validation_issues",
+                    {
+                        "external_validation_job_id": job_id,
+                        "symbol": symbol,
+                        "stage": "feature_generation",
+                        "message": str(exc)[:4000],
+                    },
                 )
-            ].copy()
+                raise
+            finally:
+                del frame
+                del loaded
+                collect_memory()
+                log_resources(
+                    "external_validation_symbol_checkpoint",
+                    path=self.temp_root,
+                    extra={"symbol": symbol, "samples_completed": processed},
+                )
 
-            # Keep only groups with exactly one usable event and at least one usable control.
-            group_counts = eligible.groupby("match_group_id")["label"].agg(
-                events=lambda values: int((values == 1).sum()),
-                controls=lambda values: int((values == 0).sum()),
+        # The durable feature table is the source of truth. If the process dies
+        # during evaluation or packaging, the next run skips all completed symbols
+        # and rebuilds only the final outputs.
+        durable_rows = self.db.select_all(
+            "binance_external_validation_feature_rows",
+            filters={"external_validation_job_id": f"eq.{job_id}"},
+            order="symbol.asc,sample_id.asc",
+        )
+        feature_rows = [row["feature_json"] for row in durable_rows]
+        audit_rows = [row.get("audit_json") or {} for row in durable_rows]
+        feature_df = pd.DataFrame(feature_rows)
+        audit_df = pd.DataFrame(audit_rows)
+        if feature_df.empty:
+            raise RuntimeError("No external-validation feature rows were produced")
+        feature_df["pseudo_window_contaminated_control"] = feature_df[
+            "pseudo_window_contaminated_control"
+        ].fillna(False).astype(bool)
+        eligible = feature_df[
+            (feature_df["feature_quality_status"] == "pass")
+            & ~(
+                (feature_df["label"] == 0)
+                & feature_df["pseudo_window_contaminated_control"]
             )
-            usable_group_ids = group_counts[
-                (group_counts["events"] == 1) & (group_counts["controls"] >= 1)
-            ].index.astype(str)
-            eligible = eligible[eligible["match_group_id"].astype(str).isin(set(usable_group_ids))].copy()
-            evaluated, overall, detail_tables = evaluate_external_validation(eligible)
-            overall.update(
-                {
-                    "source_scan_id": str(scan["id"]),
-                    "source_matched_control_job_id": matched_job_id,
-                    "external_validation_job_id": job_id,
-                    "window_start": EXTERNAL_WINDOW_START,
-                    "window_end_exclusive": EXTERNAL_WINDOW_END_EXCLUSIVE,
-                    "samples_total": len(samples),
-                    "samples_processed": len(samples) - samples_failed,
-                    "raw_feature_rows": len(feature_df),
-                    "eligible_feature_rows": len(eligible),
-                    "usable_matched_groups": int(len(usable_group_ids)),
-                    "quality_status_counts": feature_df["feature_quality_status"].value_counts(dropna=False).to_dict(),
-                    "contaminated_controls": int(
-                        ((feature_df["label"] == 0) & feature_df["pseudo_window_contaminated_control"]).sum()
-                    ),
-                    "symbol_failures": failures,
-                }
-            )
+        ].copy()
+        group_counts = eligible.groupby("match_group_id")["label"].agg(
+            events=lambda values: int((values == 1).sum()),
+            controls=lambda values: int((values == 0).sum()),
+        )
+        usable_group_ids = group_counts[
+            (group_counts["events"] == 1) & (group_counts["controls"] >= 1)
+        ].index.astype(str)
+        eligible = eligible[
+            eligible["match_group_id"].astype(str).isin(set(usable_group_ids))
+        ].copy()
+        checkpoint.update(
+            {
+                "phase": "evaluation_and_packaging",
+                "samples_completed": len(durable_rows),
+                "usable_groups": int(len(usable_group_ids)),
+            }
+        )
+        self.db.update(
+            "binance_external_validation_jobs",
+            {"id": f"eq.{job_id}"},
+            {
+                "checkpoint_json": checkpoint,
+                "last_stage": "evaluation_and_packaging",
+                "last_checkpoint_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+        evaluated, overall, detail_tables = evaluate_external_validation(eligible)
+        source_records = self.db.select_all(
+            "binance_external_validation_source_manifest",
+            filters={"external_validation_job_id": f"eq.{job_id}"},
+            order="symbol.asc,source_date.asc",
+        )
+        source_manifest = [row.get("manifest_json") or {} for row in source_records]
+        overall.update(
+            {
+                "source_scan_id": str(scan["id"]),
+                "source_matched_control_job_id": matched_job_id,
+                "external_validation_job_id": job_id,
+                "window_start": EXTERNAL_WINDOW_START,
+                "window_end_exclusive": EXTERNAL_WINDOW_END_EXCLUSIVE,
+                "samples_total": len(samples),
+                "samples_processed": len(durable_rows),
+                "raw_feature_rows": len(feature_df),
+                "eligible_feature_rows": len(eligible),
+                "usable_matched_groups": int(len(usable_group_ids)),
+                "quality_status_counts": feature_df["feature_quality_status"].value_counts(dropna=False).to_dict(),
+                "contaminated_controls": int(
+                    ((feature_df["label"] == 0) & feature_df["pseudo_window_contaminated_control"]).sum()
+                ),
+                "symbol_failures": 0,
+                "memory_model": "one event-symbol frame at a time; durable per-sample feature rows",
+                "resume_model": "sample-level Supabase checkpoints",
+            }
+        )
 
-            # Build raw, independently readable feature parts.
+        work = self.temp_root / "external-validation-output" / job_id
+        shutil.rmtree(work, ignore_errors=True)
+        work.mkdir(parents=True, exist_ok=True)
+        try:
             uploaded: list[dict[str, Any]] = []
             storage_prefix = f"external-validation/{job_id}"
 
@@ -628,13 +758,22 @@ class ExternalValidationBuilder:
             index_zip = work / "external_validation_index.zip"
             _zip_directory(index, index_zip)
             index_storage = upload(index_zip, "external_validation_index")
-
+            checkpoint.update({"phase": "complete", "feature_package_count": len(feature_paths)})
+            self.db.update(
+                "binance_external_validation_jobs",
+                {"id": f"eq.{job_id}"},
+                {
+                    "checkpoint_json": checkpoint,
+                    "last_stage": "complete",
+                    "last_checkpoint_at": datetime.now(timezone.utc).isoformat(),
+                },
+            )
             return {
                 "samples_total": len(samples),
-                "samples_processed": len(samples) - samples_failed,
+                "samples_processed": len(durable_rows),
                 "feature_rows": len(feature_df),
                 "usable_groups": int(len(usable_group_ids)),
-                "failures": failures,
+                "failures": 0,
                 "candidate_register_sha256": register_sha256(),
                 "index_storage_path": index_storage,
                 "feature_package_paths": feature_paths,
@@ -643,3 +782,5 @@ class ExternalValidationBuilder:
             }
         finally:
             shutil.rmtree(work, ignore_errors=True)
+            collect_memory()
+

@@ -1,4 +1,4 @@
-# V1.2 external-validation protocol
+# V1.3 external-validation protocol
 
 ## Purpose
 

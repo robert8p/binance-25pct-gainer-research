@@ -18,9 +18,9 @@
 </head>
 <body><main>
   <h1>Binance 25% Frozen-Rule External Validation</h1>
-  <p class="muted">v{{ version }} — evaluates ChatGPT-frozen C2 and C4 only.</p>
+  <p class="muted">v{{ version }} — memory-bounded, checkpointed and resumable; evaluates ChatGPT-frozen C2 and C4 only.</p>
   <p class="warning"><strong>No pattern discovery occurs in this app.</strong> It cannot change thresholds, invent filters, combine C2 and C4, or inspect the previous sealed-test package.</p>
-  <p class="good">Fixed historical cohort: <strong>1 January–25 May 2026 UTC</strong>. Database end-exclusive date: <code>{{ external_window_end_exclusive }}</code>.</p>
+  <p class="good"><strong>Automatic recovery:</strong> if Render restarts, the worker resumes from the last completed symbol, event or sample rather than restarting the stage.<br>Fixed historical cohort: <strong>1 January–25 May 2026 UTC</strong>. Database end-exclusive date: <code>{{ external_window_end_exclusive }}</code>.</p>
   <p class="muted small">Frozen register SHA-256: <code>{{ candidate_register_sha256 }}</code></p>
 
   <section class="card">
@@ -66,26 +66,26 @@
     </section>
   </div>
 
-  <section class="card"><h2>Worker</h2>{% if heartbeat %}<p>Last heartbeat: <code>{{ heartbeat.heartbeat_at }}</code></p>{% else %}<p class="muted">No V1.2 worker heartbeat yet.</p>{% endif %}</section>
+  <section class="card"><h2>Worker</h2>{% if heartbeat %}<p>Last heartbeat: <code>{{ heartbeat.heartbeat_at }}</code></p>{% else %}<p class="muted">No V1.3 worker heartbeat yet.</p>{% endif %}</section>
 
   <section class="card">
     <h2>Fixed-period scans</h2>
-    <div class="scroll"><table><thead><tr><th>Created</th><th>Status</th><th>Progress</th><th>Candidates</th><th>Saleable</th><th>Failures</th></tr></thead><tbody>
-      {% for scan in scans %}{% if scan.research_purpose == "external_validation_c2_c4" %}<tr><td>{{ scan.created_at }}<br><span class="muted">{{ scan.id[:8] }}</span></td><td class="status">{{ scan.status }}</td><td>{{ scan.symbols_processed or 0 }}/{{ scan.symbols_total or 0 }}</td><td>{{ scan.candidates_found or 0 }}</td><td>{{ scan.events_found or 0 }}</td><td>{{ scan.failures or 0 }}</td></tr>{% endif %}{% endfor %}
+    <div class="scroll"><table><thead><tr><th>Created</th><th>Status</th><th>Progress</th><th>Checkpoint</th><th>Resumes</th><th>Candidates</th><th>Saleable</th><th>Failures</th><th>Action</th></tr></thead><tbody>
+      {% for scan in scans %}{% if scan.research_purpose == "external_validation_c2_c4" %}<tr><td>{{ scan.created_at }}<br><span class="muted">{{ scan.id[:8] }}</span></td><td class="status">{{ scan.status }}</td><td>{{ scan.symbols_processed or 0 }}/{{ scan.symbols_total or 0 }}</td><td>{{ scan.last_stage or "—" }}<br><span class="muted small">{{ scan.last_unit or "—" }}</span></td><td>{{ scan.resume_count or 0 }}</td><td>{{ scan.candidates_found or 0 }}</td><td>{{ scan.events_found or 0 }}</td><td>{{ scan.failures or 0 }}</td><td>{% if scan.status == "failed" %}<form method="post" action="/resume-job"><input type="hidden" name="job_type" value="scan"><input type="hidden" name="job_id" value="{{ scan.id }}"><button>Resume</button></form>{% else %}—{% endif %}</td></tr>{% endif %}{% endfor %}
     </tbody></table></div>
   </section>
 
   <section class="card">
     <h2>External matched-control jobs</h2>
-    <div class="scroll"><table><thead><tr><th>Created</th><th>Status</th><th>Events</th><th>Controls</th><th>Failures</th></tr></thead><tbody>
-      {% for job in matched_jobs %}{% if job.research_purpose == "external_validation_c2_c4" %}<tr><td>{{ job.created_at }}<br><span class="muted">{{ job.id[:8] }}</span></td><td class="status">{{ job.status }}</td><td>{{ job.events_processed or 0 }}/{{ job.events_total or 0 }}</td><td>{{ job.controls_created or 0 }}/{{ job.controls_target or 0 }}</td><td>{{ job.failures or 0 }}</td></tr>{% endif %}{% endfor %}
+    <div class="scroll"><table><thead><tr><th>Created</th><th>Status</th><th>Events</th><th>Controls</th><th>Checkpoint</th><th>Resumes</th><th>Failures</th><th>Action</th></tr></thead><tbody>
+      {% for job in matched_jobs %}{% if job.research_purpose == "external_validation_c2_c4" %}<tr><td>{{ job.created_at }}<br><span class="muted">{{ job.id[:8] }}</span></td><td class="status">{{ job.status }}</td><td>{{ job.events_processed or 0 }}/{{ job.events_total or 0 }}</td><td>{{ job.controls_created or 0 }}/{{ job.controls_target or 0 }}</td><td>{{ job.last_stage or "—" }}<br><span class="muted small">{{ job.last_unit or "—" }}</span></td><td>{{ job.resume_count or 0 }}</td><td>{{ job.failures or 0 }}</td><td>{% if job.status == "failed" %}<form method="post" action="/resume-job"><input type="hidden" name="job_type" value="matched"><input type="hidden" name="job_id" value="{{ job.id }}"><button>Resume</button></form>{% else %}—{% endif %}</td></tr>{% endif %}{% endfor %}
     </tbody></table></div>
   </section>
 
   <section class="card">
     <h2>Frozen-rule evaluation jobs</h2>
-    <div class="scroll"><table><thead><tr><th>Created</th><th>Status</th><th>Samples</th><th>Features</th><th>Usable groups</th><th>Decision</th><th>Failures</th></tr></thead><tbody>
-      {% for job in external_validation_jobs %}<tr><td>{{ job.created_at }}<br><span class="muted">{{ job.id[:8] }}</span></td><td class="status">{{ job.status }}</td><td>{{ job.samples_processed or 0 }}/{{ job.samples_total or 0 }}</td><td>{{ job.feature_rows or 0 }}</td><td>{{ job.usable_groups or 0 }}</td><td>{{ job.overall_decision or "—" }}</td><td>{{ job.failures or 0 }}</td></tr>{% endfor %}
+    <div class="scroll"><table><thead><tr><th>Created</th><th>Status</th><th>Samples</th><th>Features</th><th>Checkpoint</th><th>Resumes</th><th>Usable groups</th><th>Decision</th><th>Failures</th><th>Action</th></tr></thead><tbody>
+      {% for job in external_validation_jobs %}<tr><td>{{ job.created_at }}<br><span class="muted">{{ job.id[:8] }}</span></td><td class="status">{{ job.status }}</td><td>{{ job.samples_processed or 0 }}/{{ job.samples_total or 0 }}</td><td>{{ job.feature_rows or 0 }}</td><td>{{ job.last_stage or "—" }}<br><span class="muted small">{{ job.last_unit or "—" }}</span></td><td>{{ job.resume_count or 0 }}</td><td>{{ job.usable_groups or 0 }}</td><td>{{ job.overall_decision or "—" }}</td><td>{{ job.failures or 0 }}</td><td>{% if job.status == "failed" %}<form method="post" action="/resume-job"><input type="hidden" name="job_type" value="evaluation"><input type="hidden" name="job_id" value="{{ job.id }}"><button>Resume</button></form>{% else %}—{% endif %}</td></tr>{% endfor %}
     </tbody></table></div>
   </section>
 

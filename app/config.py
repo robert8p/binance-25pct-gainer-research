@@ -4,6 +4,8 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from .runtime import env_bool
+
 
 @dataclass(frozen=True)
 class Settings:
@@ -14,6 +16,9 @@ class Settings:
     binance_api_base_urls: tuple[str, ...]
     poll_seconds: int
     temp_data_dir: Path
+    max_auto_resumes: int
+    minimum_disk_free_bytes: int
+    persist_event_agg_trades: bool
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -42,4 +47,7 @@ class Settings:
             binance_api_base_urls=bases,
             poll_seconds=max(3, int(os.getenv("POLL_SECONDS", "10"))),
             temp_data_dir=temp,
+            max_auto_resumes=max(1, int(os.getenv("MAX_AUTO_RESUMES", "8"))),
+            minimum_disk_free_bytes=max(100_000_000, int(os.getenv("MINIMUM_DISK_FREE_BYTES", "750000000"))),
+            persist_event_agg_trades=env_bool("PERSIST_EVENT_AGG_TRADES", False),
         )
