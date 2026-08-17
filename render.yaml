@@ -24,6 +24,10 @@ services:
     plan: starter
     buildCommand: pip install -r requirements.txt
     startCommand: python -m app.worker
+    disk:
+      name: binance-25pct-data
+      mountPath: /var/data
+      sizeGB: 10
     envVars:
       - key: PYTHON_VERSION
         value: 3.13.5
@@ -38,7 +42,7 @@ services:
       - key: MAX_STORAGE_OBJECT_BYTES
         value: 45000000
       - key: TEMP_DATA_DIR
-        value: /tmp/binance25
+        value: /var/data
       - key: BINANCE_API_BASE_URLS
         value: https://api.binance.com,https://data-api.binance.vision
       - key: POLL_SECONDS
